@@ -66,6 +66,22 @@ export interface OpenAIToolCall {
     name: string;
     arguments: string;
   };
+  /**
+   * Gemini 3 thought signature for this call. Not part of the OpenAI schema —
+   * clients that echo it back in the assistant turn keep full model quality on
+   * multi-turn tool use. See converters/thought-signature.ts.
+   */
+  thought_signature?: string;
+}
+
+export interface OpenAIResponseFormat {
+  type: "text" | "json_object" | "json_schema";
+  json_schema?: {
+    name?: string;
+    description?: string;
+    strict?: boolean;
+    schema?: Record<string, unknown>;
+  };
 }
 
 export interface OpenAIRequest {
@@ -77,7 +93,7 @@ export interface OpenAIRequest {
   top_p?: number;
   top_k?: number;
   stream?: boolean;
-  stop?: string[];
+  stop?: string | string[];
   presence_penalty?: number;
   frequency_penalty?: number;
   seed?: number;
@@ -85,6 +101,9 @@ export interface OpenAIRequest {
   tools?: OpenAITool[];
   tool_choice?: string | { type: "function"; function: { name: string } };
   reasoning_effort?: string;
+  stream_options?: { include_usage?: boolean };
+  response_format?: OpenAIResponseFormat;
+  parallel_tool_calls?: boolean;
   [key: string]: unknown; // Allow extra fields
 }
 
@@ -94,11 +113,15 @@ export interface OpenAIUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  completion_tokens_details?: { reasoning_tokens: number };
+  prompt_tokens_details?: { cached_tokens: number };
 }
 
 export interface OpenAIResponseMessage {
   role: "assistant";
   content: string | null;
+  /** Required by the OpenAI schema; null unless the model refused. */
+  refusal: string | null;
   reasoning_content?: string;
   tool_calls?: OpenAIToolCall[];
 }
@@ -106,6 +129,8 @@ export interface OpenAIResponseMessage {
 export interface OpenAIChoice {
   index: number;
   message: OpenAIResponseMessage;
+  /** Required by the OpenAI schema; null unless logprobs were requested. */
+  logprobs: null;
   finish_reason: string;
 }
 
@@ -116,28 +141,6 @@ export interface OpenAIResponse {
   model: string;
   choices: OpenAIChoice[];
   usage: OpenAIUsage;
-}
-
-export interface OpenAIStreamDelta {
-  role?: string;
-  content?: string;
-  reasoning_content?: string;
-  tool_calls?: Partial<OpenAIToolCall>[];
-}
-
-export interface OpenAIStreamChoice {
-  index: number;
-  delta: OpenAIStreamDelta;
-  finish_reason: string | null;
-}
-
-export interface OpenAIStreamChunk {
-  id: string;
-  object: "chat.completion.chunk";
-  created: number;
-  model: string;
-  choices: OpenAIStreamChoice[];
-  usage?: OpenAIUsage;
 }
 
 // ----- Vertex AI Types -----
@@ -189,6 +192,10 @@ export interface VertexGenerationConfig {
   topK?: number;
   stopSequences?: string[];
   seed?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  responseMimeType?: string;
+  responseSchema?: Record<string, unknown>;
   candidateCount?: number;
   thinkingConfig?: VertexThinkingConfig;
   responseModalities?: string[];
@@ -223,7 +230,7 @@ export interface VertexRequest {
 }
 
 export interface VertexCandidate {
-  content: {
+  content?: {
     role: string;
     parts: VertexPart[];
   };
@@ -235,6 +242,8 @@ export interface VertexUsageMetadata {
   promptTokenCount?: number;
   candidatesTokenCount?: number;
   totalTokenCount?: number;
+  thoughtsTokenCount?: number;
+  cachedContentTokenCount?: number;
 }
 
 export interface VertexResponse {
@@ -256,15 +265,131 @@ export interface ParsedModelInfo {
   isMaxThinking: boolean;
   is2kImage: boolean;
   is4kImage: boolean;
-}
-
-export interface CredentialInfo {
-  type: "express" | "service_account";
-  projectId: string;
-  token: string;
+  /** True for image-generation models, which reject thinkingConfig. */
+  isImage: boolean;
 }
 
 export interface ModelsConfig {
   vertex_models: string[];
   vertex_express_models: string[];
+}
+
+// ----- OpenAI Responses API (/v1/responses) -----
+// Field names follow the published OpenAI OpenAPI spec.
+
+export interface ResponsesTextFormat {
+  type: "text" | "json_object" | "json_schema";
+  name?: string;
+  description?: string;
+  strict?: boolean;
+  schema?: Record<string, unknown>;
+}
+
+export interface ResponsesFunctionTool {
+  type: "function";
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+  strict?: boolean;
+}
+
+export interface ResponsesInputItem {
+  type?: string;
+  role?: string;
+  content?: unknown;
+  /** function_call */
+  id?: string;
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+  /** function_call_output */
+  output?: unknown;
+  /** Gemini 3 signature, echoed back by clients that preserve it. */
+  thought_signature?: string;
+}
+
+export interface ResponsesRequest {
+  model: string;
+  input?: string | ResponsesInputItem[];
+  instructions?: string | null;
+  max_output_tokens?: number | null;
+  temperature?: number | null;
+  top_p?: number | null;
+  stream?: boolean;
+  parallel_tool_calls?: boolean;
+  previous_response_id?: string | null;
+  metadata?: Record<string, unknown>;
+  reasoning?: { effort?: string; summary?: string | null } | null;
+  text?: { format?: ResponsesTextFormat };
+  tools?: ResponsesFunctionTool[];
+  tool_choice?: string | { type: string; name?: string };
+  [key: string]: unknown;
+}
+
+export interface ResponseUsage {
+  input_tokens: number;
+  input_tokens_details: { cached_tokens: number };
+  output_tokens: number;
+  output_tokens_details: { reasoning_tokens: number };
+  total_tokens: number;
+}
+
+export type ResponseItemStatus = "in_progress" | "completed" | "incomplete";
+
+export interface ResponseReasoningItem {
+  id: string;
+  type: "reasoning";
+  summary: Array<{ type: "summary_text"; text: string }>;
+  status?: ResponseItemStatus;
+}
+
+export interface ResponseMessageItem {
+  id: string;
+  type: "message";
+  role: "assistant";
+  status: ResponseItemStatus;
+  content: Array<{
+    type: "output_text";
+    text: string;
+    annotations: unknown[];
+  }>;
+}
+
+export interface ResponseFunctionCallItem {
+  id: string;
+  type: "function_call";
+  call_id: string;
+  name: string;
+  arguments: string;
+  status?: ResponseItemStatus;
+  thought_signature?: string;
+}
+
+export type ResponseOutputItem =
+  | ResponseReasoningItem
+  | ResponseMessageItem
+  | ResponseFunctionCallItem;
+
+export interface ResponseObject {
+  id: string;
+  object: "response";
+  created_at: number;
+  status: "completed" | "failed" | "in_progress" | "cancelled" | "queued" | "incomplete";
+  model: string;
+  output: ResponseOutputItem[];
+  output_text: string;
+  error: null | { code: string; message: string };
+  incomplete_details: null | { reason: string };
+  instructions: string | null;
+  max_output_tokens: number | null;
+  parallel_tool_calls: boolean;
+  previous_response_id: string | null;
+  reasoning: ResponsesRequest["reasoning"];
+  temperature: number | null;
+  text: { format?: ResponsesTextFormat };
+  tool_choice: ResponsesRequest["tool_choice"];
+  tools: ResponsesFunctionTool[];
+  top_p: number | null;
+  metadata: Record<string, unknown>;
+  usage?: ResponseUsage;
 }

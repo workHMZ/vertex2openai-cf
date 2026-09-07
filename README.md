@@ -1,214 +1,199 @@
 # Vertex2OpenAI on Cloudflare Workers
 
-An OpenAI-compatible API adapter for Google Vertex AI Gemini models, deployed on Cloudflare Workers. Provides a drop-in replacement endpoint so any tool or app built for the OpenAI API can use Gemini models seamlessly.
+An OpenAI-compatible adapter for Google Vertex AI **Gemini 3** models, running on Cloudflare Workers. Point any OpenAI client at it and use Gemini.
+
+Speaks **both** OpenAI wire formats — `/v1/chat/completions` and `/v1/responses` — over one conversion pipeline, so tool calling, reasoning, streaming and structured output behave identically on either.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/workHMZ/vertex2openai-cf)
 
-## Features
+## Why this exists
 
-- **OpenAI-Compatible Endpoints**: Standard `/v1/chat/completions` and `/v1/models` endpoints
-- **Streaming & Non-Streaming**: Full SSE streaming support with `TransformStream`
-- **Multiple Auth Methods**: Vertex AI Express API Key and/or Service Account JSON
-- **Official Vertex Routes**: Express keys use `publishers/google/models/...:generateContent`; service accounts use Vertex AI's OpenAI-compatible endpoint
-- **Multi-Key Rotation**: Round-robin rotation when multiple API keys are configured
-- **Thinking/Reasoning**: Extracts and surfaces `reasoning_content` from Gemini 2.5+ / 3.x models
-- **Tool/Function Calling**: Full support for OpenAI-style function calling
-- **Image Generation**: Support for `-2k` and `-4k` image generation model variants (see [Known Limitations](#known-limitations))
-- **Grounded Search**: Use `-search` suffix for Google Search grounding
-- **Zero Dependencies**: Uses only Web APIs (`fetch`, `TransformStream`, `Web Crypto`)
-- **Edge Deployment**: Runs on Cloudflare's global edge network for low latency
-- **One-Click Deploy**: Deploy button for instant setup
+Vertex AI does not accept a static credential. Its OpenAI-compatible endpoint requires an OAuth token that expires every hour, so you cannot put it in a client config. This Worker turns a Service Account into a stable endpoint you can paste anywhere, and adds what the raw endpoint lacks: model variants, reasoning extraction, Gemini 3 thought-signature handling, multi-key failover, and your own access key in front.
 
-## Quick Start
+> If you only need Gemini and not Vertex specifically, Google's own OpenAI layer at `https://generativelanguage.googleapis.com/v1beta/openai/` works with a plain AI Studio key and needs no deployment. Use this adapter when you want Vertex — its quota, data-governance terms, or regional routing.
 
-### 1. Deploy
+## Read this first
 
-Click the **Deploy to Cloudflare** button above, or deploy manually:
+- **Your `API_KEY` is the only thing between the internet and your billing account.** Use a strong random value (`npm run deploy` generates one) and set a budget alert.
+- **A plain GCP API key is not a Vertex Express key.** One made with `gcloud services api-keys create` is rejected with *"API keys are not supported by this API"*, even when scoped to `aiplatform.googleapis.com`. Express keys come from the Express mode sign-up flow. With a normal project, use `GOOGLE_CREDENTIALS_JSON`.
+- **Gemini 2.x is not supported** and returns `400` with a message pointing at `/v1/models`. The 2.5 family retired in October 2026; 2.0 shut down before it.
+- **Thinking tokens are billed as output** and dominate cost on reasoning models. A one-word answer can burn hundreds of them.
+- **`wrangler dev` reads `.dev.vars` only at startup.** Restart after editing it.
+
+## Quick start
 
 ```bash
 git clone https://github.com/workHMZ/vertex2openai-cf.git
 cd vertex2openai-cf
 npm install
+npm run deploy
 ```
 
-### 2. Configure Secrets
+`npm run deploy` prompts for the secrets and deploys. To do it by hand:
 
 ```bash
-# Required: API key to protect your adapter
-npx wrangler secret put API_KEY
-
-# Required (choose one):
-# Option A: Vertex AI Express API Key (recommended, simplest)
-npx wrangler secret put VERTEX_EXPRESS_API_KEY
-# Alias also supported: VERTEX_API_KEY
-
-# Option B: Service Account JSON (for GCP project-based auth)
-npx wrangler secret put GOOGLE_CREDENTIALS_JSON
-```
-
-### 3. Deploy
-
-```bash
+npx wrangler secret put API_KEY                  # protects this adapter
+npx wrangler secret put GOOGLE_CREDENTIALS_JSON  # Service Account JSON, one line
 npx wrangler deploy
 ```
 
-### 4. (Optional) Custom Domain
-
-In Cloudflare Dashboard → Workers & Pages → your worker → Settings → Domains & Routes → Add Custom Domain.
-
-## Environment Variables
-
-### Secrets (encrypted, set via `wrangler secret put`)
-
-| Name                                        | Required        | Description                                   |
-| ------------------------------------------- | --------------- | --------------------------------------------- |
-| `API_KEY`                                   | ✅              | API key to protect this adapter               |
-| `VERTEX_EXPRESS_API_KEY` / `VERTEX_API_KEY` | ⚠️ One of these | Vertex AI Express API Key(s), comma-separated |
-| `GOOGLE_CREDENTIALS_JSON`                   | ⚠️ is required  | Service Account JSON content(s)               |
-
-### Variables (set in `wrangler.toml` or dashboard)
-
-| Name             | Default     | Description             |
-| ---------------- | ----------- | ----------------------- |
-| `GCP_LOCATION`   | `global`    | GCP region/location     |
-| `GCP_PROJECT_ID` | auto-detect | Explicit GCP project ID |
-| `MODELS_CONFIG`  | built-in    | Custom model list JSON  |
-
-## API Usage
-
-### Authentication
-
-All requests require a Bearer token matching your configured `API_KEY`:
+Then point your client at it:
 
 ```
-Authorization: Bearer YOUR_API_KEY
+base_url  https://vertex2openai.<subdomain>.workers.dev/v1
+api_key   <your API_KEY>
+model     gemini-3.8-flash
 ```
 
-### Endpoints
+## Configuration
 
-| Method | Path                   | Description           |
-| ------ | ---------------------- | --------------------- |
-| `GET`  | `/`                    | Health check          |
-| `GET`  | `/v1/models`           | List available models |
-| `POST` | `/v1/chat/completions` | Chat completions      |
+**Secrets** (`wrangler secret put`) — one of the two credential options is required:
 
-### Example: Non-Streaming
+| Name | Description |
+| ---- | ----------- |
+| `API_KEY` | **Required.** Key that protects this adapter |
+| `GOOGLE_CREDENTIALS_JSON` | Service Account JSON key(s), comma-separated |
+| `VERTEX_EXPRESS_API_KEY` / `VERTEX_API_KEY` | Vertex AI Express API key(s), comma-separated |
+
+**Variables** (`wrangler.toml` `[vars]`):
+
+| Name | Default | Description |
+| ---- | ------- | ----------- |
+| `GCP_LOCATION` | `global` | Region, or `global` |
+| `GCP_PROJECT_ID` | from the SA key | Overrides the key's `project_id` |
+| `MODELS_CONFIG` | built-in | Custom model list JSON |
+
+Configure several credentials and the Worker rotates round-robin, retrying the next one on `429`/`5xx`/network errors. A `400` is not retried — another key would fail the same way.
+
+## Endpoints
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| `GET` | `/` | Health check (no auth) |
+| `GET` | `/v1/models` | List models |
+| `POST` | `/v1/chat/completions` | Chat Completions API |
+| `POST` | `/v1/responses` | Responses API |
 
 ```bash
-curl -X POST https://your-worker.workers.dev/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "model": "gemini-3.1-pro-preview",
-    "messages": [
-      {"role": "user", "content": "Hello, what is 2+2?"}
-    ]
-  }'
+curl https://your-worker.workers.dev/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"Hi"}]}'
 ```
 
-### Example: Streaming
+## Models
+
+| Family | IDs |
+| ------ | --- |
+| Flash (GA) | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash` |
+| Flash-Lite (GA) | `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` |
+| Preview | `gemini-3.1-pro-preview`, `gemini-3-flash-preview` |
+| Image | `gemini-3-pro-image`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image` |
+
+Capabilities come from the parsed version number ([`src/model-capabilities.ts`](src/model-capabilities.ts)), not hardcoded prefixes, so `gemini-3.10` sorts above `gemini-3.8` and a future `gemini-4-*` works by adding the id to `MODELS_CONFIG` — no code change.
+
+### Variants
+
+Append a suffix to any model id:
+
+| Suffix | Effect |
+| ------ | ------ |
+| `-search` | Google Search grounding |
+| `-nothinking` / `-max` | Lowest / highest thinking level |
+| `-2k` / `-4k` | Image resolution (image models) |
+| `-openai` / `-openaisearch` | Force the OpenAI-compatible endpoint (Service Account only) |
+
+Prefix with `[EXPRESS] ` or `[PAY] ` to pin the credential type. Unprefixed prefers Express and falls back to the Service Account.
+
+### Per-model quirks
+
+Some models reject parameters their siblings accept. Rather than letting the request fail, the adapter degrades them. Verified against the live API on 2026-09-07:
+
+| Model | Rejects | Behaviour |
+| ----- | ------- | --------- |
+| `gemini-3.8-flash` | `thinkingLevel: MINIMAL` | `none`/`minimal` become `low` |
+| `gemini-3.8-flash` | `frequencyPenalty` / `presencePenalty` | dropped |
+
+Add further models to `NO_MINIMAL_THINKING_LEVEL` / `NO_PENALTIES` in [`src/model-capabilities.ts`](src/model-capabilities.ts).
+
+### Reasoning
+
+`reasoning_effort` (Chat) and `reasoning.effort` (Responses) map to Gemini's `thinkingLevel`: `none`, `minimal`, `low`, `medium`, `high`, plus the Responses API's `xhigh`/`max`, which fold into `high`.
+
+Thoughts come back as `reasoning_content` on Chat Completions and as a `reasoning` output item on Responses.
+
+### Structured output
+
+`response_format` (Chat) and `text.format` (Responses) map to Gemini's `responseSchema`. Keywords Vertex rejects — `$schema`, `additionalProperties`, `$defs` — are stripped at every depth, so schemas from OpenAI SDK strict mode work unchanged.
+
+## Thought signatures (Gemini 3 + tools)
+
+Gemini 3 attaches a `thoughtSignature` to the first function call of each step and **rejects the next request with 400 if it is not sent back**. The OpenAI format has nowhere to put it, so the adapter surfaces it as `thought_signature` on the tool call (and on the `function_call` item in Responses).
+
+Clients that preserve it round-trip at full quality. Clients that strip unknown fields — most OpenAI SDKs — would otherwise break, so the adapter substitutes Vertex's documented `skip_thought_signature_validator` placeholder, trading some reasoning continuity for a request that succeeds. Incoming signatures are accepted as `thought_signature`, `thoughtSignature`, or `extra_content.google.thought_signature`.
+
+## Responses API
+
+| Responses | Chat Completions |
+| --------- | ---------------- |
+| `input` (string or items) | `messages` |
+| `instructions` | leading `system` message |
+| `max_output_tokens` | `max_tokens` |
+| `reasoning.effort` | `reasoning_effort` |
+| `text.format` | `response_format` |
+| `tools: [{type, name, parameters}]` | `tools: [{type, function}]` |
+| `function_call` / `function_call_output` items | `tool_calls` + `tool` message |
+
+Streaming emits the typed event sequence (`response.created` → `response.output_item.added` → `response.output_text.delta` → `response.completed`) with an incrementing `sequence_number`.
+
+**Not implemented:** server-side conversation state (`store`, `previous_response_id`, `GET`/`DELETE /v1/responses/{id}`) and OpenAI's hosted tools. Gemini's own search grounding is available via the `-search` suffix.
+
+## Performance
+
+Measured **inside workerd** (the actual Workers runtime, via `wrangler dev`), timing the full non-streaming path: `JSON.parse` → convert → `JSON.stringify`.
+
+| Workload | CPU | of the 10 ms free cap |
+| -------- | --- | --------------------- |
+| Typical text chat (~12 KB response) | 0.01 ms | 0.1% |
+| 30-turn conversation, request conversion | 0.01 ms | 0.1% |
+| Image response, 1 MB base64 | 0.50 ms | 5% |
+| Image response, 2.4 MB base64 *(a real `gemini-3.1-flash-image` reply)* | 1.20 ms | 12% |
+| Image response, 4 MB base64 | 2.15 ms | 22% |
+| Image response, 8 MB base64 | 4.84 ms | 48% |
+
+**Image generation works on the Free plan.** An earlier version of this README claimed it consumed 50–130 ms and would "very likely fail" — that was wrong by two orders of magnitude. A real 2.4 MB image reply costs about 1.2 ms.
+
+These numbers come from Apple silicon; Cloudflare's shared production hardware is slower. Even allowing a 3× factor, a typical 2–3 MB image stays comfortably under the cap, though 8 MB+ replies could get tight — check `wrangler tail`, which reports per-request CPU, if you generate very large images on the free plan.
+
+Worker bundle: **75 KiB / 17 KiB gzipped** (free-plan limit is 3 MB gzipped).
+
+Other free-plan limits worth knowing: 100,000 requests/day, 50 subrequests per request (this adapter uses at most one per configured credential), 128 MB memory, 10 ms CPU. The Paid plan raises CPU to 30 s.
+
+## Notes
+
+- **Safety settings** are sent as `BLOCK_NONE` for the four standard harm categories, which the live API accepts. Vertex also supports `OFF`; change `buildSafetySettings()` in [`src/converters/request.ts`](src/converters/request.ts) if your project needs it.
+- **Express keys travel in the `x-goog-api-key` header**, never a `?key=` query parameter, so they stay out of request logs.
+- **Token accounting.** Vertex reports thinking tokens outside `candidatesTokenCount` (native) and outside `completion_tokens` (OpenAI-compatible), so the numbers do not sum to the total. The adapter folds them back in, matching OpenAI's semantics where `reasoning_tokens` is a subset of `completion_tokens`.
+
+## Development
 
 ```bash
-curl -X POST https://your-worker.workers.dev/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "model": "gemini-3.1-pro-preview",
-    "messages": [
-      {"role": "user", "content": "Write a short poem about coding."}
-    ],
-    "stream": true
-  }'
+npm run verify   # typecheck + tests
+npm run dev      # local worker on :8787
 ```
-
-## Model Variants
-
-| Suffix          | Description                                                                        |
-| --------------- | ---------------------------------------------------------------------------------- |
-| _(none)_        | Standard model call                                                                |
-| `-openai`       | Explicit OpenAI-compatible endpoint (Service Account / `[PAY]` models only)        |
-| `-openaisearch` | OpenAI-compatible endpoint with web search (Service Account / `[PAY]` models only) |
-| `-search`       | Google Search grounding                                                            |
-| `-nothinking`   | Lower thinking budget/level where supported                                        |
-| `-max`          | Highest thinking budget/level where supported                                      |
-| `-2k`           | Image generation at 2K resolution (⚠️ see [Known Limitations](#known-limitations)) |
-| `-4k`           | Image generation at 4K resolution (⚠️ see [Known Limitations](#known-limitations)) |
-
-Models are prefixed with `[EXPRESS]` or `[PAY]` based on auth method. If you call an unprefixed model and both auth methods are configured, the Worker prefers Express mode. Use `[PAY]` to force the Service Account path.
-
-## Known Limitations
-
-### ⚠️ Image Generation on Cloudflare Workers Free Plan
-
-Image generation models (e.g., `gemini-3.1-flash-image-preview`, `-2k`, `-4k` variants) are **very likely to fail** on the Cloudflare Workers **Free plan** due to the 10ms CPU time limit.
-
-Image model responses contain large base64-encoded image data. Processing (JSON parse + format conversion) of such payloads typically consumes **50–130ms of CPU time**, far exceeding the free tier's 10ms cap. When the limit is hit, Cloudflare terminates the Worker, resulting in a `RangeError` or `exceededCpu` error.
-
-**Solutions:**
-
-| Option                           | Details                                                                                                                                                                                                            |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Upgrade to Workers Paid Plan** | $5/month with the **Unbound** usage model gives up to 30s CPU time per invocation. This fully resolves the issue.                                                                                                  |
-| **Self-host / Local deployment** | Run the adapter locally or on a VM (Docker, Node.js) where there are no CPU time constraints. See the original [vertex2openai](https://github.com/gzzhongqi/vertex2openai) project for a Docker-based alternative. |
-
-> **Note:** Standard text-only models (e.g., `gemini-3.1-flash`, `gemini-3.1-pro-preview`) work fine on the free plan — their responses are small enough to stay within the CPU limit.
-
-## Architecture
-
-```
-Client (OpenAI SDK/App)
-    │
-    ▼
-┌──────────────────────┐
-│  Cloudflare Worker    │
-│  ┌────────────────┐  │
-│  │ Auth Middleware │  │
-│  └───────┬────────┘  │
-│  ┌───────▼────────┐  │
-│  │ Request Convert│  │
-│  └───────┬────────┘  │
-│  ┌───────▼────────┐  │
-│  │ Vertex AI Call  │──┼──► Vertex AI Express or OpenAI-compat endpoint
-│  └───────┬────────┘  │
-│  ┌───────▼────────┐  │
-│  │Response Convert│  │
-│  └───────┬────────┘  │
-│          │           │
-└──────────┼───────────┘
-           ▼
-   Client receives
-   OpenAI-format response
-```
-
-## Local Development
 
 ```bash
-# Create .dev.vars for local secrets
-cat > .dev.vars << 'EOF'
+cat > .dev.vars <<'EOF'
 API_KEY=test123
-VERTEX_EXPRESS_API_KEY=your_express_key_here
+GOOGLE_CREDENTIALS_JSON={"type":"service_account",...}
 EOF
-
-# Start dev server
-npm run dev
-
-# Test health check
-curl http://localhost:8787/
-
-# Test models
-curl -H "Authorization: Bearer test123" http://localhost:8787/v1/models
-
-# Test chat
-curl -X POST http://localhost:8787/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test123" \
-  -d '{"model":"gemini-3.1-pro-preview","messages":[{"role":"user","content":"Hi!"}]}'
 ```
+
+Tests bundle the sources with the esbuild binary inside `wrangler` and run on Node's built-in test runner — no extra dependencies.
 
 ## Acknowledgments
 
-This project is inspired by and references [vertex2openai](https://github.com/gzzhongqi/vertex2openai) by gzzhongqi — a Python/Docker-based OpenAI-to-Gemini adapter. This TypeScript/Cloudflare Workers version is a ground-up rewrite optimized for edge deployment with zero runtime dependencies.
+Inspired by [vertex2openai](https://github.com/gzzhongqi/vertex2openai) by gzzhongqi. This is a ground-up TypeScript rewrite for the edge with zero runtime dependencies.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).

@@ -80,24 +80,34 @@ export function convertToolChoiceToVertex(
 export function convertFunctionCallsToOpenAI(
   parts: VertexPart[],
   responseId: string,
-  candidateIndex: number
+  candidateIndex: number,
+  /** Offset for synthesised ids so streamed chunks keep numbering upward. */
+  startIndex = 0
 ): OpenAIToolCall[] {
   const toolCalls: OpenAIToolCall[] = [];
 
   for (const part of parts) {
     if (part.functionCall) {
       const fc = part.functionCall;
+      // Two parallel calls to the same function land in the same millisecond,
+      // so the position in the response — not the clock — makes the id unique.
       const callId =
         fc.id ||
-        `call_${responseId}_${candidateIndex}_${fc.name}_${Date.now()}`;
-      toolCalls.push({
+        `call_${responseId}_${candidateIndex}_${startIndex + toolCalls.length}`;
+      const toolCall: OpenAIToolCall = {
         id: callId,
         type: "function",
         function: {
           name: fc.name,
           arguments: JSON.stringify(fc.args || {}),
         },
-      });
+      };
+      // Gemini 3 requires this back on the next turn; surface it so clients
+      // that preserve unknown fields can round-trip it.
+      if (part.thoughtSignature) {
+        toolCall.thought_signature = part.thoughtSignature;
+      }
+      toolCalls.push(toolCall);
     }
   }
 

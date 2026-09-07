@@ -1,16 +1,46 @@
 {
   "name": "vertex2openai-cf",
-  "version": "1.0.0",
-  "description": "OpenAI-compatible API adapter for Google Vertex AI Gemini models, deployed on Cloudflare Workers",
+  "version": "2.0.0",
+  "description": "OpenAI-compatible API adapter for Google Vertex AI Gemini 3 models, running on Cloudflare Workers. Serves both /v1/chat/completions and /v1/responses.",
+  "keywords": [
+    "cloudflare-workers",
+    "openai",
+    "vertex-ai",
+    "gemini",
+    "gemini-3",
+    "openai-compatible",
+    "responses-api",
+    "llm-proxy"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/workHMZ/vertex2openai-cf.git"
+  },
+  "homepage": "https://github.com/workHMZ/vertex2openai-cf#readme",
+  "bugs": {
+    "url": "https://github.com/workHMZ/vertex2openai-cf/issues"
+  },
+  "private": true,
+  "type": "module",
   "main": "src/index.ts",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "node scripts/deploy.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.js",
+    "verify": "npm run typecheck && npm test"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250424.0",
-    "typescript": "^5.8.3",
-    "wrangler": "^4.14.0"
+    "@cloudflare/workers-types": "^5.20260907.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.129.0"
+  },
+  "allowScripts": {
+    "workerd@1.20260903.1": true,
+    "esbuild@0.28.1": true
   }
 }

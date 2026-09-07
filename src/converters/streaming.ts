@@ -2,8 +2,10 @@
 // SSE Streaming response processing
 // ============================================================
 
-import type { VertexPart, VertexResponse } from "../types";
+import type { OpenAIUsage, VertexPart, VertexResponse } from "../types";
 import { convertFunctionCallsToOpenAI } from "./tools";
+import { mapFinishReason } from "./finish-reason";
+import { buildUsage, normalizeUsage } from "./response";
 
 const THINKING_TAG = "vertex_think_tag";
 
@@ -122,6 +124,10 @@ export function createStreamTransformer(
   const decoder = new TextDecoder();
   const processor = new StreamingReasoningProcessor();
   let leftover = "";
+  let doneSent = false;
+  // Upstream already terminates most streams with a finish_reason; emitting
+  // our own on top of it would hand clients two finish chunks.
+  let finishEmitted = false;
 
   return new TransformStream({
     transform(chunk, controller) {
@@ -144,15 +150,20 @@ export function createStreamTransformer(
             const cp = makeChunk(requestModel, { content: remContent }, null);
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(cp)}\n\n`));
           }
-          // Send finish chunk
-          const fp = makeChunk(requestModel, {}, "stop");
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fp)}\n\n`));
+          if (!finishEmitted) {
+            const fp = makeChunk(requestModel, {}, "stop");
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(fp)}\n\n`));
+          }
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          doneSent = true;
           return;
         }
 
         try {
           const data = JSON.parse(jsonStr);
+          // Same fix as the non-streaming path: Vertex reports reasoning
+          // tokens outside completion_tokens, so the totals do not add up.
+          if (data.usage) data.usage = normalizeUsage(data.usage);
           const choices = data.choices;
           if (!choices || !Array.isArray(choices) || choices.length === 0) {
             // Pass through non-choice chunks
@@ -163,7 +174,9 @@ export function createStreamTransformer(
 
           const delta = choices[0].delta || {};
           const content = delta.content || "";
-          const finishReason = choices[0].finish_reason;
+          // The OpenAI schema requires the key on every streamed choice.
+          const finishReason = choices[0].finish_reason ?? null;
+          if (finishReason) finishEmitted = true;
 
           // Remove extra_content if present
           delete delta.extra_content;
@@ -177,7 +190,7 @@ export function createStreamTransformer(
             }
 
             if (processedContent) {
-              const fr = !processor.insideTag ? finishReason : null;
+              const fr = processor.insideTag ? null : finishReason;
               const cChunk = makeChunkFromBase(data, requestModel, { content: processedContent }, fr);
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(cChunk)}\n\n`));
             }
@@ -201,14 +214,8 @@ export function createStreamTransformer(
     },
 
     flush(controller) {
-      // Handle any remaining data
-      if (leftover.trim()) {
-        if (leftover.startsWith("data: ") && leftover.slice(6).trim() === "[DONE]") {
-          const fp = makeChunk(requestModel, {}, "stop");
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fp)}\n\n`));
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        }
-      }
+      if (doneSent) return;
+
       const [remContent, remReasoning] = processor.flushRemaining();
       if (remReasoning) {
         const rp = makeChunk(requestModel, { reasoning_content: remReasoning }, null);
@@ -218,6 +225,15 @@ export function createStreamTransformer(
         const cp = makeChunk(requestModel, { content: remContent }, null);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(cp)}\n\n`));
       }
+
+      // The upstream connection can end without a [DONE] sentinel; OpenAI
+      // clients hang waiting for it, so always close the stream ourselves.
+      if (!finishEmitted) {
+        const fp = makeChunk(requestModel, {}, "stop");
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(fp)}\n\n`));
+      }
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      doneSent = true;
     },
   });
 }
@@ -234,13 +250,17 @@ export function createVertexStreamTransformer(
   let leftover = "";
   let doneSent = false;
   let sentRole = false;
+  // OpenAI clients accumulate tool call deltas by index, so it has to keep
+  // counting up across chunks instead of restarting at 0 for every frame.
+  let toolCallIndex = 0;
+  let sawToolCall = false;
   const responseId = `chatcmpl-${Date.now()}`;
 
   function enqueueChunk(
     controller: TransformStreamDefaultController<Uint8Array>,
     delta: Record<string, unknown>,
     finishReason: string | null,
-    usage?: Record<string, number>
+    usage?: OpenAIUsage
   ) {
     const chunk = {
       id: responseId,
@@ -287,34 +307,41 @@ export function createVertexStreamTransformer(
     const toolCalls = convertFunctionCallsToOpenAI(
       parts as VertexPart[],
       responseId,
-      0
+      0,
+      toolCallIndex
     );
-    for (const [index, toolCall] of toolCalls.entries()) {
+    for (const toolCall of toolCalls) {
+      sawToolCall = true;
       enqueueChunk(
         controller,
         {
           tool_calls: [
             {
-              index,
+              index: toolCallIndex,
               id: toolCall.id,
               type: toolCall.type,
               function: toolCall.function,
+              ...(toolCall.thought_signature
+                ? { thought_signature: toolCall.thought_signature }
+                : {}),
             },
           ],
         },
         null
       );
+      toolCallIndex++;
     }
 
     if (candidate?.finishReason) {
       const usage = data.usageMetadata
-        ? {
-            prompt_tokens: data.usageMetadata.promptTokenCount ?? 0,
-            completion_tokens: data.usageMetadata.candidatesTokenCount ?? 0,
-            total_tokens: data.usageMetadata.totalTokenCount ?? 0,
-          }
+        ? buildUsage(data.usageMetadata)
         : undefined;
-      enqueueChunk(controller, {}, mapVertexFinishReason(candidate.finishReason), usage);
+      enqueueChunk(
+        controller,
+        {},
+        mapFinishReason(candidate.finishReason, sawToolCall),
+        usage
+      );
     }
   }
 
@@ -360,24 +387,6 @@ export function createVertexStreamTransformer(
   });
 }
 
-function mapVertexFinishReason(reason: string | undefined): string {
-  switch (reason) {
-    case "STOP":
-      return "stop";
-    case "MAX_TOKENS":
-      return "length";
-    case "SAFETY":
-    case "RECITATION":
-    case "PROHIBITED_CONTENT":
-    case "SPII":
-      return "content_filter";
-    case "MALFORMED_FUNCTION_CALL":
-      return "tool_calls";
-    default:
-      return reason ? reason.toLowerCase() : "stop";
-  }
-}
-
 function makeChunk(
   model: string,
   delta: Record<string, unknown>,
@@ -396,13 +405,15 @@ function makeChunkFromBase(
   base: Record<string, unknown>,
   model: string,
   delta: Record<string, unknown>,
-  finishReason: string | null
+  finishReason: string | null | undefined
 ) {
   return {
     id: base.id || `chatcmpl-${Date.now()}`,
     object: "chat.completion.chunk",
     created: base.created || Math.floor(Date.now() / 1000),
     model,
-    choices: [{ index: 0, delta, finish_reason: finishReason }],
+    // finish_reason is required on every streamed choice; undefined would be
+    // dropped by JSON.stringify and leave the key missing.
+    choices: [{ index: 0, delta, finish_reason: finishReason ?? null }],
   };
 }

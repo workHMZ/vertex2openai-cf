@@ -1,8 +1,8 @@
 // ============================================================
-// POST /v1/chat/completions handler
+// POST /v1/responses handler (OpenAI Responses API)
 // ============================================================
 
-import type { Env, OpenAIRequest } from "../types";
+import type { Env, ResponsesRequest } from "../types";
 import { jsonError } from "../auth";
 import {
   dispatchToVertex,
@@ -16,17 +16,23 @@ import {
   createStreamTransformer,
   createVertexStreamTransformer,
 } from "../converters/streaming";
+import { responsesRequestToChat, chatToResponse } from "../converters/responses";
+import { createResponsesStreamTransformer } from "../converters/responses-streaming";
 
 /**
- * Handle POST /v1/chat/completions.
+ * Handle POST /v1/responses.
+ *
+ * The request is translated into the Chat Completions shape, sent through the
+ * same Vertex dispatch path, and the result is rendered back as a Response
+ * object — so both wire formats share one conversion pipeline.
  */
-export async function handleChatCompletions(
+export async function handleResponses(
   request: Request,
   env: Env
 ): Promise<Response> {
-  let body: OpenAIRequest;
+  let body: ResponsesRequest;
   try {
-    body = (await request.json()) as OpenAIRequest;
+    body = (await request.json()) as ResponsesRequest;
   } catch {
     return jsonError(400, "Invalid JSON in request body.", "invalid_request_error");
   }
@@ -34,28 +40,32 @@ export async function handleChatCompletions(
   if (!body.model || typeof body.model !== "string") {
     return jsonError(400, "Missing required field: model.", "invalid_request_error");
   }
-  if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
-    return jsonError(400, "Missing required field: messages.", "invalid_request_error");
+  if (body.input == null && !body.instructions) {
+    return jsonError(400, "Missing required field: input.", "invalid_request_error");
   }
 
+  const chatRequest = responsesRequestToChat(body);
   const modelInfo = parseModelName(body.model);
   const stream = Boolean(body.stream);
   console.log(
-    `Chat request: model=${body.model}, base=${modelInfo.baseModel}, stream=${stream}`
+    `Responses request: model=${body.model}, base=${modelInfo.baseModel}, stream=${stream}`
   );
 
-  const dispatched = await dispatchToVertex(env, body, modelInfo, stream);
+  const dispatched = await dispatchToVertex(env, chatRequest, modelInfo, stream);
   if (!dispatched.ok) return dispatched.error;
 
   const { upstream, nativeVertex } = dispatched;
 
   if (stream) {
-    const transformer = nativeVertex
+    const toChatChunks = nativeVertex
       ? createVertexStreamTransformer(body.model)
       : createStreamTransformer(body.model);
-    return new Response(upstream.body!.pipeThrough(transformer), {
-      headers: SSE_HEADERS,
-    });
+
+    const events = upstream
+      .body!.pipeThrough(toChatChunks)
+      .pipeThrough(createResponsesStreamTransformer(body, body.model));
+
+    return new Response(events, { headers: SSE_HEADERS });
   }
 
   let data: Record<string, unknown>;
@@ -69,9 +79,11 @@ export async function handleChatCompletions(
     );
   }
 
-  const result = nativeVertex
+  const completion = nativeVertex
     ? processVertexResponse(data, body.model)
     : processOpenAIResponse(data, body.model);
 
-  return new Response(JSON.stringify(result), { headers: JSON_HEADERS });
+  return new Response(JSON.stringify(chatToResponse(completion, body)), {
+    headers: JSON_HEADERS,
+  });
 }
