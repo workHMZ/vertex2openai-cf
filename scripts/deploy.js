@@ -1,6 +1,6 @@
-const { execSync } = require('child_process');
-const crypto = require('crypto');
-const readline = require('readline');
+import { execSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import readline from 'node:readline';
 
 const rl = readline.createInterface({
   input: process.stdin,

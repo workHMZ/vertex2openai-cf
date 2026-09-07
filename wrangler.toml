@@ -1,17 +1,22 @@
 #:schema node_modules/wrangler/config-schema.json
 name = "vertex2openai"
 main = "src/index.ts"
-compatibility_date = "2026-04-21"
-compatibility_flags = ["nodejs_compat"]
+compatibility_date = "2026-09-03"
+# No Node.js APIs are used — the Worker runs on Web APIs only.
+# compatibility_flags = ["nodejs_compat"]
 
 [vars]
 GCP_LOCATION = "global"
 
+# Optional: pin the GCP project when the Service Account key names a different one.
+# GCP_PROJECT_ID = "your-project-id"
+
 # Secrets (set via `wrangler secret put`):
-# API_KEY                  - Required. API key to protect this adapter.
-# VERTEX_EXPRESS_API_KEY   - Vertex AI Express API key(s), comma-separated for multiple.
+# API_KEY                  - Required. API key that protects this adapter.
+# GOOGLE_CREDENTIALS_JSON  - Service Account JSON key(s), comma-separated.
+# VERTEX_EXPRESS_API_KEY   - Vertex AI Express API key(s), comma-separated.
 # VERTEX_API_KEY           - Alias for VERTEX_EXPRESS_API_KEY.
-# GOOGLE_CREDENTIALS_JSON  - Optional. Service Account JSON key(s), comma-separated.
+# One of GOOGLE_CREDENTIALS_JSON / VERTEX_EXPRESS_API_KEY is required.
 
 [observability]
 enabled = true

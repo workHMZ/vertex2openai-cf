@@ -9,12 +9,12 @@ import type {
   OpenAIUsage,
   VertexPart,
   VertexResponse,
+  VertexUsageMetadata,
 } from "../types";
 import { convertFunctionCallsToOpenAI } from "./tools";
+import { mapFinishReason } from "./finish-reason";
 
 const THINKING_TAG = "vertex_think_tag";
-const OPEN_TAG = `<${THINKING_TAG}>`;
-const CLOSE_TAG = `</${THINKING_TAG}>`;
 
 /**
  * Extract reasoning content from thinking tags.
@@ -29,6 +29,9 @@ export function extractReasoningByTags(text: string): [string, string] {
   const parts: string[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) parts.push(m[1]);
+  if (parts.length === 0) return ["", text];
+  // Only collapse whitespace where a tag was removed — trimming untagged
+  // output would eat leading indentation in code answers.
   const normal = text.replace(re, "").trim();
   return [parts.join("").trim(), normal];
 }
@@ -47,7 +50,11 @@ export function processOpenAIResponse(
   for (const c of choices) {
     const msg = (c.message as Record<string, unknown>) || {};
     const raw = msg.content as string | null;
-    const out: OpenAIResponseMessage = { role: "assistant", content: raw ?? null };
+    const out: OpenAIResponseMessage = {
+      role: "assistant",
+      content: raw ?? null,
+      refusal: (msg.refusal as string | null) ?? null,
+    };
 
     if (typeof raw === "string" && raw.length > 0) {
       const [reasoning, content] = extractReasoningByTags(raw);
@@ -55,24 +62,28 @@ export function processOpenAIResponse(
       if (reasoning) out.reasoning_content = reasoning;
     }
 
-    if (msg.tool_calls) {
-      out.tool_calls = msg.tool_calls as OpenAIResponseMessage["tool_calls"];
-      out.content = null;
+    const toolCalls = msg.tool_calls as OpenAIResponseMessage["tool_calls"];
+    if (toolCalls && toolCalls.length > 0) {
+      out.tool_calls = toolCalls;
+      // Gemini can emit a preamble alongside a tool call; keep it rather than
+      // dropping it, but normalise "" to null the way OpenAI does.
+      out.content = out.content || null;
     }
 
     processed.push({
       index: (c.index as number) ?? 0,
       message: out,
-      finish_reason: (c.finish_reason as string) ?? "stop",
+      logprobs: null,
+      finish_reason:
+        toolCalls && toolCalls.length > 0
+          ? "tool_calls"
+          : (c.finish_reason as string) ?? "stop",
     });
   }
 
-  const u = data.usage as Record<string, number> | undefined;
-  const usage: OpenAIUsage = {
-    prompt_tokens: u?.prompt_tokens ?? 0,
-    completion_tokens: u?.completion_tokens ?? 0,
-    total_tokens: u?.total_tokens ?? 0,
-  };
+  const usage = normalizeUsage(
+    data.usage as Record<string, unknown> | undefined
+  );
 
   return {
     id: (data.id as string) ?? `chatcmpl-${Date.now()}`,
@@ -82,24 +93,6 @@ export function processOpenAIResponse(
     choices: processed,
     usage,
   };
-}
-
-function mapFinishReason(reason: string | undefined): string {
-  switch (reason) {
-    case "STOP":
-      return "stop";
-    case "MAX_TOKENS":
-      return "length";
-    case "SAFETY":
-    case "RECITATION":
-    case "PROHIBITED_CONTENT":
-    case "SPII":
-      return "content_filter";
-    case "MALFORMED_FUNCTION_CALL":
-      return "tool_calls";
-    default:
-      return reason ? reason.toLowerCase() : "stop";
-  }
 }
 
 function extractParts(parts: VertexPart[]): {
@@ -144,6 +137,7 @@ export function processVertexResponse(
     const message: OpenAIResponseMessage = {
       role: "assistant",
       content: content || null,
+      refusal: null,
     };
 
     if (reasoning) message.reasoning_content = reasoning;
@@ -157,23 +151,24 @@ export function processVertexResponse(
     choices.push({
       index,
       message,
-      finish_reason: mapFinishReason(candidate.finishReason),
+      logprobs: null,
+      finish_reason: mapFinishReason(
+        candidate.finishReason,
+        toolCalls.length > 0
+      ),
     });
   }
 
   if (choices.length === 0) {
     choices.push({
       index: 0,
-      message: { role: "assistant", content: null },
+      message: { role: "assistant", content: null, refusal: null },
+      logprobs: null,
       finish_reason: "stop",
     });
   }
 
-  const usage: OpenAIUsage = {
-    prompt_tokens: data.usageMetadata?.promptTokenCount ?? 0,
-    completion_tokens: data.usageMetadata?.candidatesTokenCount ?? 0,
-    total_tokens: data.usageMetadata?.totalTokenCount ?? 0,
-  };
+  const usage = buildUsage(data.usageMetadata);
 
   return {
     id: responseId,
@@ -183,4 +178,73 @@ export function processVertexResponse(
     choices,
     usage,
   };
+}
+
+/**
+ * Vertex reports thinking tokens separately: candidatesTokenCount excludes
+ * them, so completion_tokens has to add them back or the numbers do not sum
+ * to total_tokens.
+ */
+export function buildUsage(meta: VertexUsageMetadata | undefined): OpenAIUsage {
+  const reasoning = meta?.thoughtsTokenCount ?? 0;
+  const cached = meta?.cachedContentTokenCount ?? 0;
+  const usage: OpenAIUsage = {
+    prompt_tokens: meta?.promptTokenCount ?? 0,
+    completion_tokens: (meta?.candidatesTokenCount ?? 0) + reasoning,
+    total_tokens: meta?.totalTokenCount ?? 0,
+  };
+  if (reasoning > 0) {
+    usage.completion_tokens_details = { reasoning_tokens: reasoning };
+  }
+  if (cached > 0) {
+    usage.prompt_tokens_details = { cached_tokens: cached };
+  }
+  return usage;
+}
+
+/**
+ * Vertex's OpenAI-compatible endpoint reports reasoning tokens *outside*
+ * completion_tokens, so prompt + completion does not reach total. OpenAI
+ * treats completion_tokens_details.reasoning_tokens as a subset of
+ * completion_tokens, so fold them in when the arithmetic says they are missing.
+ */
+export function normalizeUsage(
+  raw: Record<string, unknown> | undefined
+): OpenAIUsage {
+  const prompt = numberAt(raw, "prompt_tokens");
+  const total = numberAt(raw, "total_tokens");
+  let completion = numberAt(raw, "completion_tokens");
+
+  const details = raw?.completion_tokens_details as
+    | Record<string, unknown>
+    | undefined;
+  const reasoning = numberAt(details, "reasoning_tokens");
+
+  if (reasoning > 0 && prompt + completion + reasoning === total) {
+    completion += reasoning;
+  }
+
+  const usage: OpenAIUsage = {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: total,
+  };
+  if (reasoning > 0) {
+    usage.completion_tokens_details = { reasoning_tokens: reasoning };
+  }
+
+  const promptDetails = raw?.prompt_tokens_details as
+    | Record<string, unknown>
+    | undefined;
+  const cached = numberAt(promptDetails, "cached_tokens");
+  if (cached > 0) {
+    usage.prompt_tokens_details = { cached_tokens: cached };
+  }
+
+  return usage;
+}
+
+function numberAt(obj: Record<string, unknown> | undefined, key: string): number {
+  const value = obj?.[key];
+  return typeof value === "number" ? value : 0;
 }
