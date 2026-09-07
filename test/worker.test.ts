@@ -14,6 +14,28 @@ const worker = (await import("../src/index")).default;
 import { loadModelsConfig } from "../src/handlers/models";
 import type { Env } from "../src/types";
 
+/**
+ * A throwaway service account whose key is generated at test time, so the
+ * Service Account path exercises real JWT signing without committing any key.
+ */
+async function makeServiceAccountJson(): Promise<string> {
+  const { privateKey } = await crypto.subtle.generateKey(
+    { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+    true,
+    ["sign", "verify"]
+  );
+  const der = await crypto.subtle.exportKey("pkcs8", privateKey);
+  const b64 = Buffer.from(der).toString("base64").replace(/(.{64})/g, "$1\n");
+  return JSON.stringify({
+    type: "service_account",
+    project_id: "my-project",
+    private_key: `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`,
+    client_email: "sa@my-project.iam.gserviceaccount.com",
+  });
+}
+
+const SA_JSON = await makeServiceAccountJson();
+
 const ENV: Env = {
   API_KEY: "secret-key",
   VERTEX_EXPRESS_API_KEY: "express-1",
@@ -43,8 +65,19 @@ let realFetch: typeof globalThis.fetch;
 function stubFetch(responses: Array<() => Response>) {
   let i = 0;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+
+    // The Service Account path exchanges a JWT for a token first; that is not
+    // one of the canned Vertex responses and must not consume one.
+    if (url.startsWith("https://oauth2.googleapis.com/token")) {
+      return new Response(
+        JSON.stringify({ access_token: "stub-token", expires_in: 3600 }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     calls.push({
-      url: String(input),
+      url,
       headers: (init?.headers ?? {}) as Record<string, string>,
       body: JSON.parse(String(init?.body ?? "{}")),
     });
@@ -493,6 +526,47 @@ describe("POST /v1/chat/completions", () => {
     const cfg = calls[0].body.generationConfig as Record<string, unknown>;
     assert.equal(cfg.thinkingConfig, undefined);
     assert.deepEqual(cfg.responseModalities, ["TEXT", "IMAGE"]);
+  });
+
+  test("routes image models to native generateContent, not the OpenAI endpoint", async () => {
+    // The OpenAI-compatible endpoint rejects response_modalities outright, so
+    // an image model must take the native route even on a service account.
+    stubFetch([OK_VERTEX]);
+    await call(
+      "/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authed(),
+        body: JSON.stringify({
+          model: "[PAY] gemini-3.1-flash-image",
+          messages: [{ role: "user", content: "a cat" }],
+        }),
+      },
+      { ...ENV, VERTEX_EXPRESS_API_KEY: undefined, GOOGLE_CREDENTIALS_JSON: SA_JSON } as Env
+    );
+
+    assert.match(calls[0].url, /publishers\/google\/models\/gemini-3\.1-flash-image:generateContent$/);
+    assert.ok(!calls[0].url.includes("endpoints/openapi"), calls[0].url);
+    const cfg = calls[0].body.generationConfig as Record<string, unknown>;
+    assert.deepEqual(cfg.responseModalities, ["TEXT", "IMAGE"]);
+    assert.equal(calls[0].body.extra_body, undefined);
+  });
+
+  test("keeps text models on the OpenAI-compatible endpoint", async () => {
+    stubFetch([jsonResponse({ choices: [{ index: 0, message: { role: "assistant", content: "hi" }, finish_reason: "stop" }], usage: {} })]);
+    await call(
+      "/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authed(),
+        body: JSON.stringify({
+          model: "[PAY] gemini-3.8-flash",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+      { ...ENV, VERTEX_EXPRESS_API_KEY: undefined, GOOGLE_CREDENTIALS_JSON: SA_JSON } as Env
+    );
+    assert.match(calls[0].url, /endpoints\/openapi\/chat\/completions$/);
   });
 
   test("sends only roles Vertex accepts", async () => {

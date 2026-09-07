@@ -9,6 +9,7 @@ import {
   missingCredentialMessage,
   buildOpenAIEndpointUrl,
   buildExpressGenerateContentUrl,
+  buildProjectGenerateContentUrl,
   buildHeaders,
   type CredentialPreference,
   type VertexClientOptions,
@@ -122,13 +123,20 @@ async function callVertex(
   label: string,
   stream: boolean
 ): Promise<Attempt> {
-  const nativeVertex = creds.authType === "express";
+  // The OpenAI-compatible endpoint cannot express `response_modalities`, so
+  // image models take the native route whichever credential is in play.
+  const nativeVertex =
+    creds.authType === "express" ||
+    getModelCapabilities(modelInfo.baseModel).isImage;
 
   let url: string;
   let payload: unknown;
   try {
     if (nativeVertex) {
-      url = buildExpressGenerateContentUrl(creds, modelInfo.baseModel, stream);
+      url =
+        creds.authType === "express"
+          ? buildExpressGenerateContentUrl(creds, modelInfo.baseModel, stream)
+          : buildProjectGenerateContentUrl(creds, modelInfo.baseModel, stream);
       payload = buildVertexGenerateContentBody(body, modelInfo);
     } else {
       url = buildOpenAIEndpointUrl(creds, "/chat/completions");

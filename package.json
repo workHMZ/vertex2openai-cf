@@ -1,6 +1,6 @@
 {
   "name": "vertex2openai-cf",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "OpenAI-compatible API adapter for Google Vertex AI Gemini 3 models, running on Cloudflare Workers. Serves both /v1/chat/completions and /v1/responses.",
   "keywords": [
     "cloudflare-workers",

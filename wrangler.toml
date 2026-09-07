@@ -8,7 +8,8 @@ compatibility_date = "2026-09-03"
 [vars]
 GCP_LOCATION = "global"
 
-# Optional: pin the GCP project when the Service Account key names a different one.
+# Optional. The project is read from the Service Account key, so this is only
+# needed when you want to override it. Leave it out of a public repo.
 # GCP_PROJECT_ID = "your-project-id"
 
 # Secrets (set via `wrangler secret put`):

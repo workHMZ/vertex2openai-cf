@@ -173,6 +173,8 @@ Safety settings go out as `BLOCK_NONE` on the four standard harm categories. Ver
 
 Express keys travel in the `x-goog-api-key` header rather than a `?key=` query parameter, so they stay out of request logs.
 
+Image models always take Vertex's native `generateContent` route, even on a service account, because the OpenAI-compatible endpoint rejects `response_modalities` and so can't be asked for a picture. Text models keep using the compatible endpoint.
+
 Vertex reports thinking tokens outside `completion_tokens`, which leaves prompt plus completion short of the total. The adapter folds them back in to match OpenAI, where `reasoning_tokens` is a subset of `completion_tokens`.
 
 ## Development

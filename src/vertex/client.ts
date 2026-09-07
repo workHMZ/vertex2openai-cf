@@ -128,6 +128,33 @@ export function buildOpenAIEndpointUrl(
 }
 
 /**
+ * Build the project-scoped native generateContent URL.
+ *
+ * Image models need this even on a Service Account: Vertex's
+ * OpenAI-compatible endpoint rejects `response_modalities` outright
+ * ("no such field"), so there is no way to ask it for an image.
+ */
+export function buildProjectGenerateContentUrl(
+  opts: VertexClientOptions,
+  model: string,
+  stream: boolean
+): string {
+  if (opts.authType !== "service_account" || !opts.projectId) {
+    throw new Error("Project-scoped generateContent requires Service Account credentials.");
+  }
+
+  const host =
+    opts.location === "global"
+      ? "https://aiplatform.googleapis.com"
+      : `https://${opts.location}-aiplatform.googleapis.com`;
+  const action = stream ? "streamGenerateContent" : "generateContent";
+  const query = stream ? "?alt=sse" : "";
+  return `${host}/v1/projects/${opts.projectId}/locations/${opts.location}/publishers/google/models/${encodeURIComponent(
+    model
+  )}:${action}${query}`;
+}
+
+/**
  * Build the official Vertex AI Express generateContent URL.
  */
 export function buildExpressGenerateContentUrl(

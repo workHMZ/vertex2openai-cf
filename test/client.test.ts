@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildOpenAIEndpointUrl,
   buildExpressGenerateContentUrl,
+  buildProjectGenerateContentUrl,
   buildHeaders,
   getCredentialSources,
   type VertexClientOptions,
@@ -74,6 +75,39 @@ describe("buildExpressGenerateContentUrl", () => {
   test("carries the key in x-goog-api-key instead", () => {
     assert.equal(buildHeaders(express)["x-goog-api-key"], "secret-key");
     assert.equal(buildHeaders(sa)["Authorization"], "Bearer token");
+  });
+});
+
+describe("buildProjectGenerateContentUrl", () => {
+  test("is project-scoped, unlike the Express URL", () => {
+    assert.equal(
+      buildProjectGenerateContentUrl(sa, "gemini-3.1-flash-image", false),
+      "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global/publishers/google/models/gemini-3.1-flash-image:generateContent"
+    );
+  });
+
+  test("adds alt=sse when streaming", () => {
+    assert.match(
+      buildProjectGenerateContentUrl(sa, "gemini-3.1-flash-image", true),
+      /:streamGenerateContent\?alt=sse$/
+    );
+  });
+
+  test("uses the regional host for a region", () => {
+    assert.match(
+      buildProjectGenerateContentUrl({ ...sa, location: "us-central1" }, "m", false),
+      /^https:\/\/us-central1-aiplatform\.googleapis\.com\/v1\/projects\/my-project\/locations\/us-central1\//
+    );
+  });
+
+  test("refuses Express credentials", () => {
+    assert.throws(() =>
+      buildProjectGenerateContentUrl(
+        { authType: "express", location: "global", apiKey: "k" },
+        "m",
+        false
+      )
+    );
   });
 });
 
