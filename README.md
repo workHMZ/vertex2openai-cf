@@ -168,21 +168,23 @@ Server-side conversation state is not implemented: no `store` or `GET`/`DELETE /
 
 The free plan gives a Worker 10 ms of CPU per request. Waiting on Vertex doesn't count, only the Worker's own work does.
 
-Text is comfortably inside that. Measured on Cloudflare itself (the `cpuTime` that `wrangler tail` reports), a chat request takes 2 to 4 ms. The first request an isolate serves takes about 16 ms, because it signs the service account's token; after that the token is cached for the hour.
+Measured on Cloudflare itself, with the `cpuTime` that `wrangler tail` reports for each request:
 
-Images are heavier, because the reply carries the whole picture as base64 and the Worker has to parse and re-serialise it. `npm run bench` measures the Worker's own CPU on a laptop, with Vertex's reply fed in 4 KB pieces the way the network delivers it:
+| Request | CPU on Cloudflare |
+| ------- | --- |
+| chat, not streamed | 2 to 6 ms |
+| chat or Responses, streamed | 3 to 12 ms |
+| first request on a fresh isolate | about 16 ms, once: it signs the service account's token, then caches it for the hour |
+| image at default size (2.9 MB base64), not streamed | about 36 ms |
+| the same image, streamed | about 100 ms |
 
-| Reply | CPU on a laptop |
-| ----- | --- |
-| text, streamed or not | 0.1 to 0.5 ms |
-| image at default size, 2.9 MB base64 | about 5 ms, streamed or not |
-| image at 2K, 11.6 MB | about 18 ms |
+Text sits around the budget. Images are well past it, because the reply carries the whole picture as base64 and the Worker has to parse and re-serialise it; streaming costs more again, since the picture arrives as thousands of small network reads. Cloudflare served every one of these requests, but don't count on that: **for image generation, use the paid plan**, which gives you 30 seconds of CPU, and ask for images without streaming. Above the default resolution it only gets heavier, and a 4K reply is also a ~54 MB HTTP response, uncomfortable against the 128 MB memory an isolate has to work with.
 
-Cloudflare's hardware is slower than a laptop, so a default-size image is near the limit and **anything above the default resolution wants the paid plan**, which gives you 30 seconds of CPU. A 4K reply is also a ~54 MB HTTP response, which gets uncomfortable against the 128 MB memory an isolate has to work with.
+Streamed images used to be far worse: the stream reader re-scanned the partial line every time a network chunk arrived, which made the cost grow with the square of the image size (8 seconds of CPU for a default-size image on a slow machine). Lines are now joined once, when they end.
 
-Streamed images used to be far worse: the stream reader re-scanned the partial line every time a network chunk arrived, so a 2.9 MB image cost 90 ms or more. Lines are now joined once, when they end.
+`npm run bench` measures the same thing on your own machine, with Vertex's reply fed in 4 KB pieces the way the network delivers it. Treat its numbers as relative: a laptop is several times faster than Cloudflare's shared hardware.
 
-The Worker bundles to 75 KiB, 17 KiB gzipped.
+The Worker bundles to 79 KiB, 18 KiB gzipped.
 
 Free plan also caps you at 100,000 requests a day, 50 subrequests per request (this uses one per credential it tries) and 128 MB of memory. The paid plan raises CPU to 30 seconds.
 

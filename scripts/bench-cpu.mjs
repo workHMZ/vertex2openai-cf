@@ -6,7 +6,8 @@
 // canned replies, since time spent waiting on the network does not count
 // toward the Workers CPU limit. Each case is compared with the Free plan's
 // 10 ms budget after multiplying by SLOWDOWN: this runs on a developer
-// machine, and Cloudflare's shared hardware is slower.
+// machine, and Cloudflare's shared hardware is slower. Image replies are
+// reported but do not fail the run; they need the paid plan either way.
 //
 // Needs Node 22.18+ (it imports the TypeScript sources directly).
 
@@ -14,7 +15,9 @@ import { timingSafeEqual } from "node:crypto";
 import { randomBytes } from "node:crypto";
 
 const FREE_PLAN_MS = 10;
-const SLOWDOWN = 3;
+// Calibrated against `wrangler tail` on 2026-09-24: a default-size image
+// took ~5 ms here and ~36 ms of CPU on Cloudflare.
+const SLOWDOWN = 7;
 
 // workerd has crypto.subtle.timingSafeEqual; Node does not.
 crypto.subtle.timingSafeEqual ??= (a, b) =>
@@ -170,8 +173,8 @@ const CASES = [
   ["text, OpenAI endpoint, streamed", () => withToken(openaiStream, "text/event-stream"), "/v1/chat/completions", chat({ model: "[PAY] gemini-3.8-flash", stream: true })],
   ["Responses API, streamed", () => withToken(openaiStream, "text/event-stream"), "/v1/responses", { model: "[PAY] gemini-3.8-flash", input: "hi", stream: true }],
   ["40-turn tool history (request side)", () => reply(nativeJson), "/v1/chat/completions", chat({ messages: longHistory })],
-  ["image 1K (~2.9 MB base64)", () => reply(imageJson(2.9e6)), "/v1/chat/completions", chat({ model: "gemini-3.1-flash-image" })],
-  ["image 1K, streamed", () => reply(sse([imageJson(2.9e6)]), "text/event-stream"), "/v1/chat/completions", chat({ model: "gemini-3.1-flash-image", stream: true })],
+  ["image 1K (~2.9 MB base64) [paid plan]", () => reply(imageJson(2.9e6)), "/v1/chat/completions", chat({ model: "gemini-3.1-flash-image" }), true],
+  ["image 1K, streamed [paid plan]", () => reply(sse([imageJson(2.9e6)]), "text/event-stream"), "/v1/chat/completions", chat({ model: "gemini-3.1-flash-image", stream: true }), true],
   ["image 2K (~11.6 MB) [paid plan]", () => reply(imageJson(11.6e6)), "/v1/chat/completions", chat({ model: "gemini-3.1-flash-image-2k" }), true],
 ];
 
@@ -183,7 +186,7 @@ for (const [name, setup, path, payload, paidOnly] of CASES) {
   const projected = ms * SLOWDOWN;
   const fits = projected <= FREE_PLAN_MS;
   if (!fits && !paidOnly) failed = true;
-  const verdict = fits ? "ok" : paidOnly ? "over (documented: paid plan)" : "OVER BUDGET";
+  const verdict = fits ? "ok" : paidOnly ? "over: paid plan" : "OVER BUDGET";
   console.log(`${name.padEnd(40)} ${ms.toFixed(2).padStart(7)} ms  -> ${projected.toFixed(1).padStart(5)} ms  ${verdict}`);
 }
 process.exit(failed ? 1 : 0);
