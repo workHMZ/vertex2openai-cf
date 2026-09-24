@@ -216,55 +216,29 @@ export function signToolCallsForOpenAIEndpoint(
 }
 
 /**
- * OpenAI's `response_format` maps onto Gemini's responseMimeType /
- * responseSchema pair. Without this, structured-output requests silently
- * return prose.
+ * OpenAI's `response_format` maps onto Gemini structured output. Without
+ * this, structured-output requests silently return prose.
+ *
+ * A schema goes through responseFormat untouched: unlike the OpenAPI-subset
+ * responseSchema, it accepts the `$defs`/`$ref`, `additionalProperties` and
+ * `$schema` that OpenAI SDKs generate.
  */
 export function convertResponseFormat(
   format: OpenAIResponseFormat | undefined
-): Pick<VertexGenerationConfig, "responseMimeType" | "responseSchema"> | undefined {
+): Pick<VertexGenerationConfig, "responseMimeType" | "responseFormat"> | undefined {
   if (!format) return undefined;
 
-  if (format.type === "json_object") {
+  const schema =
+    format.type === "json_schema" ? format.json_schema?.schema : undefined;
+  if (schema) {
+    return { responseFormat: { text: { mimeType: "APPLICATION_JSON", schema } } };
+  }
+
+  if (format.type === "json_object" || format.type === "json_schema") {
     return { responseMimeType: "application/json" };
   }
 
-  if (format.type === "json_schema") {
-    const schema = format.json_schema?.schema;
-    return {
-      responseMimeType: "application/json",
-      ...(schema ? { responseSchema: stripUnsupportedSchemaKeys(schema) } : {}),
-    };
-  }
-
   return undefined;
-}
-
-/**
- * Vertex rejects JSON Schema drafts' bookkeeping keywords outright, and
- * OpenAI's strict mode always emits additionalProperties.
- */
-const UNSUPPORTED_SCHEMA_KEYS = ["$schema", "additionalProperties", "$id", "definitions", "$defs"];
-
-export function stripUnsupportedSchemaKeys(
-  schema: Record<string, unknown>
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(schema)) {
-    if (UNSUPPORTED_SCHEMA_KEYS.includes(key)) continue;
-    if (Array.isArray(value)) {
-      out[key] = value.map((v) =>
-        v && typeof v === "object"
-          ? stripUnsupportedSchemaKeys(v as Record<string, unknown>)
-          : v
-      );
-    } else if (value && typeof value === "object") {
-      out[key] = stripUnsupportedSchemaKeys(value as Record<string, unknown>);
-    } else {
-      out[key] = value;
-    }
-  }
-  return out;
 }
 
 // ----- Message Conversion -----
@@ -300,14 +274,71 @@ function convertMessageParts(msg: OpenAIMessage): VertexPart[] {
           });
         }
       } else if (url.length > 0) {
+        // Vertex fetches the URL itself but still rejects a fileData part
+        // without a MIME type ("empty mimeType parameter in fileData").
         parts.push({
-          fileData: { fileUri: url },
+          fileData: { mimeType: guessImageMimeType(url), fileUri: url },
         });
       }
     }
   }
 
   return parts;
+}
+
+const MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  heic: "image/heic",
+  heif: "image/heif",
+  pdf: "application/pdf",
+};
+
+/**
+ * An image_url only carries the URL, so the MIME type is read off the file
+ * extension. Anything unrecognised is sent as JPEG, the common case for
+ * extensionless CDN image links.
+ */
+export function guessImageMimeType(url: string): string {
+  let path = url;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    // Not a parseable URL; fall back to the raw string.
+  }
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  return MIME_BY_EXTENSION[ext] ?? "image/jpeg";
+}
+
+/**
+ * functionResponse.response is a protobuf Struct, so Vertex rejects a bare
+ * JSON array or scalar with a 400 ("Proto field is not repeating"). Tools
+ * commonly return lists, so anything that is not an object gets wrapped.
+ */
+function toFunctionResponse(
+  content: OpenAIMessage["content"]
+): Record<string, unknown> {
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content.map((p) => (p.type === "text" ? p.text : "")).join("")
+        : "";
+
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : { result: parsed };
+    } catch {
+      // Looked like JSON but was not; send it as text.
+    }
+  }
+  return { result: text };
 }
 
 /**
@@ -338,24 +369,11 @@ export function convertMessagesToVertex(
     if (msg.role === "tool") {
       const toolCallId = msg.tool_call_id || "";
       const funcName = msg.name || toolCallNames.get(toolCallId) || "function_response";
-      let responseData: Record<string, unknown>;
-
-      try {
-        const content =
-          typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-        if (content && (content.trim().startsWith("{") || content.trim().startsWith("["))) {
-          responseData = JSON.parse(content);
-        } else {
-          responseData = { result: content };
-        }
-      } catch {
-        responseData = { result: String(msg.content) };
-      }
 
       pendingFunctionResponses.push({
         functionResponse: {
           name: funcName,
-          response: responseData,
+          response: toFunctionResponse(msg.content),
           id: toolCallId || undefined,
         },
       });
@@ -541,15 +559,9 @@ export function buildOpenAICompatibleBody(
     body.parallel_tool_calls = request.parallel_tool_calls;
   }
 
-  // Add reasoning_effort if valid
-  if (
-    request.reasoning_effort &&
-    ["none", "minimal", "low", "medium", "high"].includes(
-      request.reasoning_effort as string
-    )
-  ) {
-    body.reasoning_effort = request.reasoning_effort;
-  }
+  // reasoning_effort is never forwarded: it is expressed as thinking_level
+  // below, and a raw "none" would contradict the clamp on models that reject
+  // MINIMAL.
 
   // Google-specific extra body for thinking/safety
   const thinkingTag = "vertex_think_tag";
@@ -571,18 +583,10 @@ export function buildOpenAICompatibleBody(
     google.thinking_config = level
       ? { include_thoughts: true, thinking_level: level.toLowerCase() }
       : { include_thoughts: true };
-    // thinking_level is the authoritative control; a stale reasoning_effort
-    // (e.g. "none" on a model that rejects MINIMAL) would contradict it.
-    delete body.reasoning_effort;
   }
 
-  // Image generation (for image models). The IMAGE modality has to be asked
-  // for even when no explicit size variant was requested.
-  if (modelInfo.isImage) {
-    google.response_modalities = ["TEXT", "IMAGE"];
-    if (modelInfo.is2kImage) google.image_config = { image_size: "2K" };
-    else if (modelInfo.is4kImage) google.image_config = { image_size: "4K" };
-  }
+  // Image models never come here: this endpoint rejects response_modalities
+  // ("no such field"), so dispatch sends them down the native route.
 
   // Search tool
   if (modelInfo.isSearch || modelInfo.isOpenAISearch) {

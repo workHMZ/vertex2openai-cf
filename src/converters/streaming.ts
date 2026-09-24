@@ -6,6 +6,7 @@ import type { OpenAIUsage, VertexPart, VertexResponse } from "../types";
 import { convertFunctionCallsToOpenAI } from "./tools";
 import { mapFinishReason } from "./finish-reason";
 import { buildUsage, normalizeUsage } from "./response";
+import { SseLineBuffer } from "./sse-lines";
 
 const THINKING_TAG = "vertex_think_tag";
 
@@ -17,8 +18,18 @@ export class StreamingReasoningProcessor {
   private openTag = `<${THINKING_TAG}>`;
   private closeTag = `</${THINKING_TAG}>`;
   private buffer = "";
-  insideTag = false;
+  private insideTag = false;
   private partialTagBuffer = "";
+  // Vertex follows the closing tag with "\n\n"; the non-streaming path trims
+  // it, so strip whitespace ahead of the first visible text after a thought.
+  private sawThought = false;
+  private sawVisible = false;
+
+  private visible(text: string): string {
+    if (this.sawThought && !this.sawVisible) text = text.replace(/^\s+/, "");
+    if (/\S/.test(text)) this.sawVisible = true;
+    return text;
+  }
 
   /**
    * Process a content chunk, separating reasoning from normal content.
@@ -60,6 +71,7 @@ export class StreamingReasoningProcessor {
           processed += this.buffer.slice(0, openPos);
           this.buffer = this.buffer.slice(openPos + this.openTag.length);
           this.insideTag = true;
+          this.sawThought = true;
         }
       } else {
         const closePos = this.buffer.indexOf(this.closeTag);
@@ -90,26 +102,20 @@ export class StreamingReasoningProcessor {
       }
     }
 
-    return [processed, reasoning];
+    return [this.visible(processed), reasoning];
   }
 
   /** Flush remaining buffered content. Returns [content, reasoning]. */
   flushRemaining(): [string, string] {
-    let content = "";
-    let reasoning = "";
-
-    if (this.partialTagBuffer) {
-      content += this.partialTagBuffer;
-      this.partialTagBuffer = "";
-    }
-    if (!this.insideTag) {
-      content += this.buffer;
-    } else {
-      reasoning = this.buffer;
-      this.insideTag = false;
-    }
+    // A half-received tag belongs to whichever side it was cut off in.
+    const rest = this.buffer + this.partialTagBuffer;
     this.buffer = "";
-    return [content, reasoning];
+    this.partialTagBuffer = "";
+    if (this.insideTag) {
+      this.insideTag = false;
+      return ["", rest];
+    }
+    return [this.visible(rest), ""];
   }
 }
 
@@ -121,9 +127,8 @@ export function createStreamTransformer(
   requestModel: string
 ): TransformStream<Uint8Array, Uint8Array> {
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
+  const input = new SseLineBuffer();
   const processor = new StreamingReasoningProcessor();
-  let leftover = "";
   let doneSent = false;
   // Upstream already terminates most streams with a finish_reason; emitting
   // our own on top of it would hand clients two finish chunks.
@@ -131,11 +136,8 @@ export function createStreamTransformer(
 
   return new TransformStream({
     transform(chunk, controller) {
-      const text = leftover + decoder.decode(chunk, { stream: true });
-      const lines = text.split("\n");
-      leftover = lines.pop() || "";
-
-      for (const line of lines) {
+      if (doneSent) return;
+      for (const line of input.push(chunk)) {
         if (!line.startsWith("data: ")) continue;
         const jsonStr = line.slice(6).trim();
 
@@ -172,38 +174,44 @@ export function createStreamTransformer(
             continue;
           }
 
-          const delta = choices[0].delta || {};
-          const content = delta.content || "";
+          const choice = choices[0];
+          const delta = choice.delta || {};
+          choice.delta = delta;
+          const content = typeof delta.content === "string" ? delta.content : "";
           // The OpenAI schema requires the key on every streamed choice.
-          const finishReason = choices[0].finish_reason ?? null;
-          if (finishReason) finishEmitted = true;
+          const finishReason = choice.finish_reason ?? null;
+          choice.finish_reason = finishReason;
 
           // Remove extra_content if present
           delete delta.extra_content;
 
-          if (content) {
-            const [processedContent, currentReasoning] = processor.processChunk(content);
+          let text = "";
+          let reasoning = "";
+          if (content) [text, reasoning] = processor.processChunk(content);
+          // A finished candidate sends nothing more, so whatever the tag
+          // parser is holding back has to go out ahead of the finish chunk.
+          if (finishReason) {
+            const [restText, restReasoning] = processor.flushRemaining();
+            text += restText;
+            reasoning += restReasoning;
+            finishEmitted = true;
+          }
 
-            if (currentReasoning) {
-              const rChunk = makeChunkFromBase(data, requestModel, { reasoning_content: currentReasoning }, null);
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(rChunk)}\n\n`));
-            }
+          if (reasoning) {
+            const rChunk = makeChunkFromBase(data, requestModel, { reasoning_content: reasoning }, null);
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(rChunk)}\n\n`));
+          }
 
-            if (processedContent) {
-              const fr = processor.insideTag ? null : finishReason;
-              const cChunk = makeChunkFromBase(data, requestModel, { content: processedContent }, fr);
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(cChunk)}\n\n`));
-            }
-          } else if (delta.tool_calls) {
-            // Pass through tool call deltas
-            data.model = requestModel;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-          } else if (finishReason) {
-            // Finish without content
-            data.model = requestModel;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-          } else {
-            // Empty delta, pass through
+          // Vertex puts finish_reason and usage on the chunk that carries the
+          // last piece of text, so the rest of the upstream chunk — role, tool
+          // calls, finish_reason, usage — travels with the visible text rather
+          // than being rebuilt from scratch and losing fields.
+          if (text) delta.content = text;
+          else delete delta.content;
+          const onlyReasoning =
+            content && !text && !finishReason && !data.usage &&
+            Object.keys(delta).length === 0;
+          if (!onlyReasoning) {
             data.model = requestModel;
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
           }
@@ -246,14 +254,15 @@ export function createVertexStreamTransformer(
   requestModel: string
 ): TransformStream<Uint8Array, Uint8Array> {
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  let leftover = "";
+  const input = new SseLineBuffer();
   let doneSent = false;
   let sentRole = false;
   // OpenAI clients accumulate tool call deltas by index, so it has to keep
   // counting up across chunks instead of restarting at 0 for every frame.
   let toolCallIndex = 0;
   let sawToolCall = false;
+  // Clients wait for a finish_reason; an upstream error replaces it.
+  let finished = false;
   const responseId = `chatcmpl-${Date.now()}`;
 
   function enqueueChunk(
@@ -274,9 +283,34 @@ export function createVertexStreamTransformer(
   }
 
   function processVertexChunk(
-    data: VertexResponse,
+    data: VertexResponse & { error?: unknown },
     controller: TransformStreamDefaultController<Uint8Array>
   ) {
+    // An error frame mid-stream: pass it on in the shape OpenAI SDKs raise
+    // from, rather than ending the stream as if the answer were complete.
+    if (data.error) {
+      controller.enqueue(
+        encoder.encode(`data: ${JSON.stringify({ error: data.error })}\n\n`)
+      );
+      finished = true;
+      return;
+    }
+
+    // A blocked prompt arrives as a single frame with promptFeedback and no
+    // candidates.
+    if (!data.candidates?.length && data.promptFeedback?.blockReason) {
+      if (!sentRole) enqueueChunk(controller, { role: "assistant" }, null);
+      sentRole = true;
+      enqueueChunk(
+        controller,
+        {},
+        "content_filter",
+        data.usageMetadata ? buildUsage(data.usageMetadata) : undefined
+      );
+      finished = true;
+      return;
+    }
+
     const candidate = data.candidates?.[0];
     const parts = candidate?.content?.parts || [];
 
@@ -342,6 +376,7 @@ export function createVertexStreamTransformer(
         mapFinishReason(candidate.finishReason, sawToolCall),
         usage
       );
+      finished = true;
     }
   }
 
@@ -367,18 +402,18 @@ export function createVertexStreamTransformer(
 
   return new TransformStream({
     transform(chunk, controller) {
-      const text = leftover + decoder.decode(chunk, { stream: true });
-      const lines = text.split("\n");
-      leftover = lines.pop() || "";
-
-      for (const line of lines) {
+      for (const line of input.push(chunk)) {
         processLine(line.trimEnd(), controller);
       }
     },
 
     flush(controller) {
-      const tail = leftover.trim();
+      const tail = input.rest().trim();
       if (tail) processLine(tail, controller);
+      // The connection can drop before the frame carrying finishReason.
+      if (!finished && !doneSent) {
+        enqueueChunk(controller, {}, sawToolCall ? "tool_calls" : "stop");
+      }
       if (!doneSent) {
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         doneSent = true;

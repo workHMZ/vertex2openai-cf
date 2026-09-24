@@ -45,7 +45,9 @@ Secrets go through `wrangler secret put`. You need `API_KEY` plus one credential
 | ---- | --- |
 | `API_KEY` | Required. Guards this adapter |
 | `GOOGLE_CREDENTIALS_JSON` | Service account JSON, comma-separated for several |
-| `VERTEX_EXPRESS_API_KEY` / `VERTEX_API_KEY` | Express API keys, comma-separated |
+| `VERTEX_EXPRESS_API_KEY` / `VERTEX_API_KEY` | Express API keys, or API keys bound to a service account (see Gotchas), comma-separated |
+
+Cloudflare caps every variable and secret at 5 KB. A service account key is about 2.3 KB, so one `GOOGLE_CREDENTIALS_JSON` holds two at most.
 
 Plain variables live in `wrangler.toml` under `[vars]`:
 
@@ -90,7 +92,9 @@ Suffix any id to change its behaviour:
 | `-search` | Google Search grounding |
 | `-nothinking` / `-max` | Lowest / highest thinking level |
 | `-2k` / `-4k` | Image resolution |
-| `-openai` / `-openaisearch` | Force the OpenAI-compatible endpoint, service account only |
+| `-openai` / `-openaisearch` | Force the OpenAI-compatible endpoint, service account only, text models only |
+
+Image models get only the size suffixes: they always take the native route, and search either fails or comes back empty on them.
 
 Prefix with `[EXPRESS] ` or `[PAY] ` to pin the credential type. Without a prefix it prefers an Express key and falls back to the service account.
 
@@ -102,17 +106,28 @@ Thoughts come back as `reasoning_content` on Chat Completions and as a `reasonin
 
 ### Structured output
 
-`response_format` and `text.format` both map to Gemini's `responseSchema`. Schemas from OpenAI's strict mode work unchanged: the keywords Vertex rejects (`$schema`, `additionalProperties`, `$defs`) get stripped at every level on the way through.
+`response_format` and `text.format` both work, and so do tool `parameters`. Schemas pass through untouched, including what Pydantic and Zod generate: `$defs` and `$ref`, `additionalProperties`, nullable unions like `"type": ["string", "null"]`.
+
+That matters on the native route (Express keys, image models). Its older `responseSchema` and `parameters` fields reject `$ref` and type arrays with a 400, so the adapter uses `responseFormat` and `parametersJsonSchema`, which take plain JSON Schema. The OpenAI-compatible endpoint handles these schemas itself.
 
 ## Gotchas
 
 **Your `API_KEY` is the only thing between the internet and your billing account.** Use a strong random value and set a budget alert. `npm run deploy` generates one if you type `random`.
 
-**A normal GCP API key is not a Vertex Express key.** Making one with `gcloud services api-keys create` gets you `API keys are not supported by this API`, even scoped to `aiplatform.googleapis.com`. Express keys come from the Express mode sign-up. On an ordinary project, use `GOOGLE_CREDENTIALS_JSON`.
+**A plain GCP API key won't work, but one bound to a service account will.** An ordinary key gets `API keys are not supported by this API`, even scoped to `aiplatform.googleapis.com`. Bind it to a service account that has the Vertex AI User role and it works as `VERTEX_EXPRESS_API_KEY`, which saves you pasting a service account key into Cloudflare:
+
+```bash
+gcloud beta services api-keys create --display-name=vertex2openai \
+  --service-account=SA_EMAIL --api-target=service=aiplatform.googleapis.com
+```
+
+Keys from the Express mode sign-up work the same way.
 
 **Gemini 2.x is gone.** The 2.5 family retired in October 2026, 2.0 before it. Asking for one returns a 400 that points you at `/v1/models`.
 
 **Thinking tokens bill as output** and usually dominate the cost. A one-word answer can spend hundreds of them.
+
+**When you're being rate limited, a stream can sit silent for minutes.** Instead of a 429, Vertex's OpenAI-compatible endpoint sometimes holds a streaming request with no response at all and then answers normally; we measured 36, 143 and 184 seconds, against 2 to 4 seconds normally. The adapter waits up to 5 minutes before trying the next credential or returning a 504, so give your client a read timeout of at least that, or it will hang up on answers that were about to arrive.
 
 **`wrangler dev` reads `.dev.vars` once, at startup.** Restart it after you edit that file.
 
@@ -147,21 +162,25 @@ The translation, if you're curious what maps to what:
 
 Streaming emits the typed events, `response.created` through `response.output_text.delta` to `response.completed`, each with an incrementing `sequence_number`.
 
-Server-side conversation state is not implemented: no `store`, `previous_response_id`, or `GET`/`DELETE /v1/responses/{id}`. Neither are OpenAI's hosted tools; for search, use the `-search` model suffix.
+Server-side conversation state is not implemented: no `store` or `GET`/`DELETE /v1/responses/{id}`. A request carrying `previous_response_id` or `conversation` gets a 400 rather than an answer that silently forgot the earlier turns; send the whole history in `input` instead. OpenAI's hosted tools aren't there either; for search, use the `-search` model suffix.
 
 ## Cost and limits
 
-For text, conversion overhead is nothing: about 0.01 ms of CPU per request against the free plan's 10 ms budget.
+The free plan gives a Worker 10 ms of CPU per request. Waiting on Vertex doesn't count, only the Worker's own work does.
 
-Images are a different story, because the reply carries the whole picture as base64 and the Worker has to parse and re-serialise it. Measured in workerd on real replies:
+Text is comfortably inside that. Measured on Cloudflare itself (the `cpuTime` that `wrangler tail` reports), a chat request takes 2 to 4 ms. The first request an isolate serves takes about 16 ms, because it signs the service account's token; after that the token is cached for the hour.
 
-| Model | base64 | CPU | Free plan |
-| ----- | ------ | --- | --------- |
-| `gemini-3.1-flash-image` | 2.9 MB | 1.9 ms | fits |
-| `gemini-3.1-flash-image-2k` | 11.6 MB | 8.5 ms | too close to the 10 ms cap |
-| `gemini-3-pro-image-4k` | 36.1 MB | 31 ms | over by 3x |
+Images are heavier, because the reply carries the whole picture as base64 and the Worker has to parse and re-serialise it. `npm run bench` measures the Worker's own CPU on a laptop, with Vertex's reply fed in 4 KB pieces the way the network delivers it:
 
-Those timings come off a fast laptop and Cloudflare's shared hardware is slower, so treat them as a floor. **Image generation above the default resolution wants the paid plan**, which gives you 30 seconds of CPU. A 4K reply is also a ~54 MB HTTP response, which gets uncomfortable against the 128 MB memory an isolate has to work with.
+| Reply | CPU on a laptop |
+| ----- | --- |
+| text, streamed or not | 0.1 to 0.5 ms |
+| image at default size, 2.9 MB base64 | about 5 ms, streamed or not |
+| image at 2K, 11.6 MB | about 18 ms |
+
+Cloudflare's hardware is slower than a laptop, so a default-size image is near the limit and **anything above the default resolution wants the paid plan**, which gives you 30 seconds of CPU. A 4K reply is also a ~54 MB HTTP response, which gets uncomfortable against the 128 MB memory an isolate has to work with.
+
+Streamed images used to be far worse: the stream reader re-scanned the partial line every time a network chunk arrived, so a 2.9 MB image cost 90 ms or more. Lines are now joined once, when they end.
 
 The Worker bundles to 75 KiB, 17 KiB gzipped.
 
@@ -180,18 +199,29 @@ Vertex reports thinking tokens outside `completion_tokens`, which leaves prompt 
 ## Development
 
 ```bash
-npm run verify   # typecheck and tests
-npm run dev      # local worker on :8787
+npm run verify     # typecheck, unit tests, coverage
+npm run dev        # local worker on :8787
+npm run test:e2e   # the full feature suite against a running worker
+npm run bench      # CPU per request against the free plan budget
 ```
 
 Local secrets go in `.dev.vars`:
 
 ```
 API_KEY=test123
-GOOGLE_CREDENTIALS_JSON={"type":"service_account",...}
+GOOGLE_CREDENTIALS_JSON='{"type":"service_account",...}'
+VERTEX_EXPRESS_API_KEY=...
 ```
 
-Tests bundle the sources with the esbuild binary that comes with wrangler and run on Node's test runner, so there's nothing extra to install.
+Unit tests run on Node's own test runner with nothing extra to install. On Node 22.18 and later they run the TypeScript directly and fail if coverage drops below 99% of lines, 90% of branches or 100% of functions. Older Node bundles them with the esbuild binary that ships with wrangler and skips the coverage check.
+
+The end-to-end suite talks to a real worker and real Vertex, so it costs a little:
+
+```bash
+E2E_BASE_URL=http://localhost:8787 E2E_API_KEY=test123 npm run test:e2e
+```
+
+It looks at `/v1/models` to see which credentials the worker has and tests each route it can reach: `[EXPRESS]` goes through the native `generateContent`, `[PAY]` through the OpenAI-compatible endpoint. It covers plain and streamed replies, truncation, thinking levels, multi-turn chat, tool calls with the signature round trip, `tool_choice`, structured output, image input by data URL and by link, search grounding, image generation and the Responses API. `E2E_SKIP_IMAGES=1` leaves out image generation, which is the expensive part.
 
 ## Acknowledgments
 

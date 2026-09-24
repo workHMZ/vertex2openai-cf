@@ -1,4 +1,4 @@
-import { test, describe, beforeEach, afterEach } from "node:test";
+import { test, describe, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 
@@ -12,6 +12,7 @@ if (!(crypto.subtle as { timingSafeEqual?: unknown }).timingSafeEqual) {
 
 const worker = (await import("../src/index")).default;
 import { loadModelsConfig } from "../src/handlers/models";
+import { STREAM_START_TIMEOUT_MS } from "../src/vertex/dispatch";
 import type { Env } from "../src/types";
 
 /**
@@ -125,6 +126,16 @@ describe("routing", () => {
     assert.equal(res.headers.get("Access-Control-Allow-Origin"), "*");
   });
 
+  test("preflight allows the headers the OpenAI SDK sends from a browser", async () => {
+    const requested = "authorization,content-type,x-stainless-os,x-stainless-retry-count";
+    const res = await call("/v1/chat/completions", {
+      method: "OPTIONS",
+      headers: { "Access-Control-Request-Headers": requested },
+    });
+    assert.equal(res.headers.get("Access-Control-Allow-Headers"), requested);
+    assert.equal(res.headers.get("Vary"), "Access-Control-Request-Headers");
+  });
+
   test("a trailing slash still routes", async () => {
     const res = await call("/v1/models/", { headers: authed() });
     assert.equal(res.status, 200);
@@ -198,6 +209,21 @@ describe("GET /v1/models", () => {
       assert.ok(!id.endsWith("-max"), id);
       assert.ok(!id.endsWith("-search"), id);
     }
+  });
+
+  test("offers image models no OpenAI-endpoint or search variants", async () => {
+    // Image models always go native, and search 400s or comes back empty on them.
+    const res = await call("/v1/models", { headers: authed() }, {
+      API_KEY: "secret-key",
+      GOOGLE_CREDENTIALS_JSON: SA_JSON,
+    });
+    const ids = (await res.json() as { data: { id: string }[] }).data.map((m) => m.id);
+    const image = ids.filter((i) => i.includes("image"));
+    assert.ok(image.length > 0);
+    for (const id of image) {
+      assert.match(id, /image(-2k|-4k)?$/, id);
+    }
+    assert.ok(ids.includes("[PAY] gemini-3.8-flash-openaisearch"));
   });
 
   test("returns an empty list when nothing is configured", async () => {
@@ -682,8 +708,12 @@ describe("POST /v1/responses", () => {
     });
 
     const cfg = calls[0].body.generationConfig as Record<string, unknown>;
-    assert.equal(cfg.responseMimeType, "application/json");
-    assert.deepEqual(cfg.responseSchema, { type: "object" });
+    assert.deepEqual(cfg.responseFormat, {
+      text: {
+        mimeType: "APPLICATION_JSON",
+        schema: { type: "object", additionalProperties: false },
+      },
+    });
   });
 
   test("streams typed response.* events", async () => {
@@ -737,11 +767,207 @@ describe("POST /v1/responses", () => {
     }
   });
 
+  test("refuses server-side state instead of silently dropping history", async () => {
+    stubFetch([OK_VERTEX]);
+    for (const [field, value] of [
+      ["previous_response_id", "resp_123"],
+      ["conversation", "conv_123"],
+    ] as const) {
+      const res = await call("/v1/responses", {
+        method: "POST",
+        headers: authed(),
+        body: JSON.stringify({ model: "gemini-3.8-flash", input: "and then?", [field]: value }),
+      });
+      assert.equal(res.status, 400, field);
+      const err = (await res.json() as { error: { param: string } }).error;
+      assert.equal(err.param, field);
+    }
+    assert.equal(calls.length, 0, "nothing should reach Vertex");
+  });
+
+  test("accepts an explicit null previous_response_id", async () => {
+    stubFetch([OK_VERTEX]);
+    const res = await call("/v1/responses", {
+      method: "POST",
+      headers: authed(),
+      body: JSON.stringify({ model: "gemini-3.8-flash", input: "hi", previous_response_id: null }),
+    });
+    assert.equal(res.status, 200);
+  });
+
   test("needs auth and rejects GET", async () => {
     assert.equal((await call("/v1/responses", { method: "POST" })).status, 401);
     assert.equal(
       (await call("/v1/responses", { method: "GET", headers: authed() })).status,
       405
     );
+  });
+});
+
+describe("failure paths", () => {
+  const chatBody = (model = "gemini-3.8-flash", extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], ...extra });
+  const post = (path: string, body: string, env: Env = ENV) =>
+    call(path, { method: "POST", headers: authed(), body }, env);
+  const message = async (res: Response) =>
+    (await res.json() as { error: { message: string } }).error.message;
+
+  test("GET on the chat route is 405, not a crash", async () => {
+    const res = await call("/v1/chat/completions", { headers: authed() });
+    assert.equal(res.status, 405);
+  });
+
+  test("a non-JSON 200 from Vertex becomes a 502 on both endpoints", async () => {
+    for (const path of ["/v1/chat/completions", "/v1/responses"]) {
+      stubFetch([() => new Response("<html>gateway</html>", { status: 200 })]);
+      const body = path === "/v1/responses"
+        ? JSON.stringify({ model: "gemini-3.8-flash", input: "hi" })
+        : chatBody();
+      const res = await post(path, body);
+      assert.equal(res.status, 502, path);
+      assert.match(await message(res), /Malformed response/, path);
+    }
+  });
+
+  test("the Responses endpoint rejects a malformed body", async () => {
+    const res = await post("/v1/responses", "{nope");
+    assert.equal(res.status, 400);
+  });
+
+  test("says which setting is missing when nothing is configured", async () => {
+    const res = await post("/v1/chat/completions", chatBody(), { API_KEY: "secret-key" });
+    assert.equal(res.status, 500);
+    assert.match(await message(res), /VERTEX_EXPRESS_API_KEY or GOOGLE_CREDENTIALS_JSON/);
+  });
+
+  test("[EXPRESS] without an Express key names the missing key", async () => {
+    const res = await post("/v1/chat/completions", chatBody("[EXPRESS] gemini-3.8-flash"), {
+      API_KEY: "secret-key",
+      GOOGLE_CREDENTIALS_JSON: SA_JSON,
+    });
+    assert.equal(res.status, 500);
+    assert.match(await message(res), /VERTEX_EXPRESS_API_KEY/);
+  });
+
+  test("a failed token exchange is reported, not thrown", async () => {
+    // A different client_email so the token cache from other tests is not hit.
+    const sa = JSON.parse(SA_JSON);
+    sa.client_email = "broken@my-project.iam.gserviceaccount.com";
+    globalThis.fetch = (async () =>
+      new Response('{"error":"invalid_grant"}', { status: 400 })) as typeof fetch;
+    const res = await post("/v1/chat/completions", chatBody("[PAY] gemini-3.8-flash"), {
+      API_KEY: "secret-key",
+      GOOGLE_CREDENTIALS_JSON: JSON.stringify(sa),
+    });
+    assert.equal(res.status, 500);
+    assert.match(await message(res), /invalid_grant/);
+  });
+
+  test("a streaming reply without a body tries the next key", async () => {
+    stubFetch([() => new Response(null, { status: 200 }), OK_VERTEX]);
+    const res = await post("/v1/chat/completions", chatBody("gemini-3.8-flash", { stream: true }), {
+      API_KEY: "secret-key",
+      VERTEX_EXPRESS_API_KEY: "k1,k2",
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(res.status, 200);
+  });
+
+  test("an unexpected exception becomes a 500 with CORS", async () => {
+    const env = new Proxy({ API_KEY: "secret-key" } as Env, {
+      get(target, key) {
+        if (key === "VERTEX_EXPRESS_API_KEY") throw new Error("binding exploded");
+        return target[key as keyof Env];
+      },
+    });
+    const res = await post("/v1/chat/completions", chatBody(), env);
+    assert.equal(res.status, 500);
+    assert.equal(res.headers.get("Access-Control-Allow-Origin"), "*");
+    assert.match(await message(res), /binding exploded/);
+  });
+});
+
+describe("a Vertex stream that never starts", () => {
+  // Under rate limiting Vertex can hold a stream for minutes before answering.
+  const STREAM_OK =
+    'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}\n\n';
+
+  /** Upstream that hangs for the first `hangs` calls until the caller aborts. */
+  function stubHanging(hangs: number) {
+    const seen: AbortSignal[] = [];
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(init!.signal!);
+      if (seen.length <= hangs) {
+        return new Promise<Response>((_, reject) =>
+          init!.signal!.addEventListener("abort", () => reject(new Error("aborted")))
+        );
+      }
+      return new Response(STREAM_OK, { headers: { "Content-Type": "text/event-stream" } });
+    }) as typeof fetch;
+    return seen;
+  }
+
+  const until = async (cond: () => boolean) => {
+    while (!cond()) await new Promise((r) => setImmediate(r));
+  };
+
+  const request = (stream: boolean, env: Env = ENV) =>
+    call("/v1/chat/completions", {
+      method: "POST",
+      headers: authed(),
+      body: JSON.stringify({ model: "gemini-3.8-flash", stream, messages: [{ role: "user", content: "hi" }] }),
+    }, env);
+
+  beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
+  afterEach(() => mock.timers.reset());
+
+  test("waits out a long queue rather than giving up early", async () => {
+    // 184 s was the longest successful wait measured; the cap must clear it.
+    assert.ok(STREAM_START_TIMEOUT_MS >= 240_000);
+    const seen = stubHanging(1);
+    const pending = request(true);
+    await until(() => seen.length === 1);
+    mock.timers.tick(200_000);
+    assert.equal(seen[0].aborted, false);
+    mock.timers.tick(STREAM_START_TIMEOUT_MS);
+    await pending;
+  });
+
+  test("returns a retryable 504 once the cap passes on a single key", async () => {
+    const seen = stubHanging(1);
+    const pending = request(true);
+    await until(() => seen.length === 1);
+    mock.timers.tick(STREAM_START_TIMEOUT_MS);
+    const res = await pending;
+    assert.equal(res.status, 504);
+    assert.equal(seen.length, 1, "the same queue is not joined again");
+    assert.match((await res.json() as { error: { message: string } }).error.message, /did not start responding/);
+  });
+
+  test("moves on to the next key once the cap passes", async () => {
+    const seen = stubHanging(1);
+    const pending = request(true, { API_KEY: "secret-key", VERTEX_EXPRESS_API_KEY: "k1,k2" });
+    await until(() => seen.length === 1);
+    mock.timers.tick(STREAM_START_TIMEOUT_MS);
+    const res = await pending;
+    assert.equal(res.status, 200);
+    assert.equal(seen.length, 2);
+    assert.match(await res.text(), /"content":"hi"[\s\S]*\[DONE\]/);
+  });
+
+  test("a non-streamed request is never cut off, however long it takes", async () => {
+    let release!: () => void;
+    let signal!: AbortSignal;
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      signal = init!.signal!;
+      await new Promise<void>((r) => (release = r));
+      return OK_VERTEX();
+    }) as typeof fetch;
+    const pending = request(false);
+    await until(() => signal !== undefined);
+    mock.timers.tick(STREAM_START_TIMEOUT_MS * 10);
+    assert.equal(signal.aborted, false);
+    release();
+    assert.equal((await pending).status, 200);
   });
 });

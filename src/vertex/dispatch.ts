@@ -30,6 +30,21 @@ import {
  */
 const RETRYABLE_STATUSES = new Set([401, 403, 408, 429, 500, 502, 503, 504]);
 
+/**
+ * When the project is being rate limited, Vertex's OpenAI-compatible
+ * endpoint can hold a streaming request with no status or headers for
+ * minutes and then answer normally (measured 2026-09-24: 36 s, 143 s and
+ * 184 s, all successful; a healthy stream starts in 2-4 s even at the
+ * highest thinking level). Giving up early would throw away a place in that
+ * queue, so this is only a last resort, well past anything observed: after
+ * it, the next credential is tried, or the client gets a 504 it can retry
+ * instead of waiting out its own, usually longer, timeout.
+ *
+ * Non-streamed requests only get headers once the whole answer exists, so
+ * they are never cut off.
+ */
+export const STREAM_START_TIMEOUT_MS = 300_000;
+
 export type DispatchResult =
   | { ok: true; upstream: Response; nativeVertex: boolean }
   | { ok: false; error: Response };
@@ -87,7 +102,7 @@ export async function dispatchToVertex(
     if (!result.retryable || attempt === sources.length - 1) break;
 
     console.warn(
-      `${source.label} failed with ${result.status}; trying next credential.`
+      `${source.label} failed with ${result.status ?? "a network error or stall"}; trying next credential.`
     );
   }
 
@@ -151,13 +166,34 @@ async function callVertex(
   }
 
   let resp: Response;
+  const abort = new AbortController();
+  let stalled = false;
+  const timer = stream
+    ? setTimeout(() => {
+        stalled = true;
+        abort.abort();
+      }, STREAM_START_TIMEOUT_MS)
+    : undefined;
   try {
     resp = await fetch(url, {
       method: "POST",
       headers: buildHeaders(creds),
       body: JSON.stringify(payload),
+      signal: abort.signal,
     });
   } catch (e) {
+    if (stalled) {
+      console.warn(`Vertex stream via ${label} did not start within ${STREAM_START_TIMEOUT_MS} ms.`);
+      return {
+        ok: false,
+        retryable: true,
+        error: jsonError(
+          504,
+          `Vertex AI did not start responding within ${STREAM_START_TIMEOUT_MS / 1000} seconds.`,
+          "server_error"
+        ),
+      };
+    }
     // Network-level failure: another credential may reach a healthier region.
     return {
       ok: false,
@@ -168,6 +204,9 @@ async function callVertex(
         "server_error"
       ),
     };
+  } finally {
+    // Once the headers are in, the body streams for as long as it needs.
+    if (timer !== undefined) clearTimeout(timer);
   }
 
   if (!resp.ok) {

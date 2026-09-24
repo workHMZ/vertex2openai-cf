@@ -60,11 +60,12 @@ async function secureCompare(a: string, b: string): Promise<boolean> {
 export function jsonError(
   status: number,
   message: string,
-  type = "authentication_error"
+  type = "authentication_error",
+  param: string | null = null
 ): Response {
   return new Response(
     JSON.stringify({
-      error: { message, type, code: status, param: null },
+      error: { message, type, code: status, param },
     }),
     {
       status,

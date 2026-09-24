@@ -44,6 +44,19 @@ export async function handleResponses(
     return jsonError(400, "Missing required field: input.", "invalid_request_error");
   }
 
+  // Both ask the server to prepend stored history. This adapter keeps no
+  // state, so ignoring them would silently drop the conversation so far.
+  for (const field of ["previous_response_id", "conversation"] as const) {
+    if (body[field] != null) {
+      return jsonError(
+        400,
+        `'${field}' is not supported: this adapter does not store responses. Send the full conversation in 'input' instead.`,
+        "invalid_request_error",
+        field
+      );
+    }
+  }
+
   const chatRequest = responsesRequestToChat(body);
   const modelInfo = parseModelName(body.model);
   const stream = Boolean(body.stream);

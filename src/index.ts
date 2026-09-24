@@ -12,7 +12,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Handle CORS preflight
     if (request.method === "OPTIONS") {
-      return handleCORS();
+      return handleCORS(request);
     }
 
     try {
@@ -103,8 +103,19 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Max-Age": "86400",
 };
 
-function handleCORS(): Response {
-  return new Response(null, { status: 204, headers: CORS_HEADERS });
+/**
+ * The OpenAI SDKs send their own headers (x-stainless-*, OpenAI-Beta, ...)
+ * from the browser, so a fixed allow-list fails their preflight. Echo back
+ * whatever the browser asks for; Authorization is still checked per request.
+ */
+function handleCORS(request: Request): Response {
+  const headers = new Headers(CORS_HEADERS);
+  const requested = request.headers.get("Access-Control-Request-Headers");
+  if (requested) {
+    headers.set("Access-Control-Allow-Headers", requested);
+    headers.set("Vary", "Access-Control-Request-Headers");
+  }
+  return new Response(null, { status: 204, headers });
 }
 
 function withCORS(response: Response): Response {

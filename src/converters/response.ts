@@ -160,11 +160,12 @@ export function processVertexResponse(
   }
 
   if (choices.length === 0) {
+    // No candidates plus promptFeedback means the prompt itself was blocked.
     choices.push({
       index: 0,
       message: { role: "assistant", content: null, refusal: null },
       logprobs: null,
-      finish_reason: "stop",
+      finish_reason: data.promptFeedback?.blockReason ? "content_filter" : "stop",
     });
   }
 

@@ -380,7 +380,8 @@ describe("chatToResponse", () => {
       { ...base, input: "hi" }
     );
     assert.equal(res.status, "incomplete");
-    assert.deepEqual(res.incomplete_details, { reason: "length" });
+    // The spec only allows max_output_tokens / content_filter here.
+    assert.deepEqual(res.incomplete_details, { reason: "max_output_tokens" });
   });
 
   test("echoes the request settings the spec requires on the object", () => {
@@ -607,18 +608,44 @@ describe("createResponsesStreamTransformer", () => {
     });
   });
 
-  test("marks a truncated stream incomplete", async () => {
+  test("ends a truncated stream with response.incomplete", async () => {
     const events = await pumpEvents([
       chatChunk({ content: "part" }),
       chatChunk({}, "length"),
     ]);
-    const completed = events.at(-1)!;
-    const response = completed.response as {
+    const last = events.at(-1)!;
+    assert.equal(last.type, "response.incomplete");
+    const response = last.response as {
       status: string;
       incomplete_details: unknown;
     };
     assert.equal(response.status, "incomplete");
-    assert.deepEqual(response.incomplete_details, { reason: "length" });
+    assert.deepEqual(response.incomplete_details, { reason: "max_output_tokens" });
+  });
+
+  test("keeps a signature nested under extra_content on streamed calls", async () => {
+    // Live shape from the OpenAI-compatible endpoint.
+    const events = await pumpEvents([
+      chatChunk({
+        role: "assistant",
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_1",
+            type: "function",
+            function: { name: "f", arguments: "{}" },
+            extra_content: { google: { thought_signature: "NESTED" } },
+          },
+        ],
+      }),
+      chatChunk({}, "tool_calls"),
+    ]);
+    const done = events.find((e) => e.type === "response.output_item.done")!;
+    assert.equal((done.item as { thought_signature?: string }).thought_signature, "NESTED");
+    const output = (events.at(-1)!.response as {
+      output: Array<{ thought_signature?: string }>;
+    }).output;
+    assert.equal(output[0].thought_signature, "NESTED");
   });
 
   test("always finishes with response.completed even with no content", async () => {
@@ -638,5 +665,26 @@ describe("createResponsesStreamTransformer", () => {
     ]);
     const completed = events.at(-1)!;
     assert.equal((completed.response as { output_text: string }).output_text, "ok");
+  });
+});
+
+describe("responsesRequestToChat edge cases", () => {
+  test("replays an assistant refusal as text and keeps parallel_tool_calls", () => {
+    const chat = responsesRequestToChat({
+      ...base,
+      parallel_tool_calls: false,
+      input: [
+        { role: "user", content: "do the thing" },
+        { type: "message", role: "assistant", content: [{ type: "refusal", refusal: "I can't." }] },
+        { role: "user", content: [{ type: "input_text", text: "ok" }] },
+      ],
+    });
+    assert.equal(chat.parallel_tool_calls, false);
+    assert.deepEqual(chat.messages[1].content, [{ type: "text", text: "I can't." }]);
+  });
+
+  test("drops tool_choice shapes Chat Completions has no equivalent for", () => {
+    assert.equal(convertResponsesToolChoice({ type: "allowed_tools" }), undefined);
+    assert.equal(convertResponsesToolChoice({ type: "function" }), undefined);
   });
 });

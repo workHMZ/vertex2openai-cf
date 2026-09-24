@@ -9,7 +9,9 @@ import type {
   ResponseOutputItem,
   ResponseUsage,
 } from "../types";
-import { buildOutputItems, makeResponseId } from "./responses";
+import { buildOutputItems, incompleteReason, makeResponseId } from "./responses";
+import { readToolCallSignature } from "./thought-signature";
+import { SseLineBuffer } from "./sse-lines";
 
 interface PendingToolCall {
   outputIndex: number;
@@ -19,6 +21,14 @@ interface PendingToolCall {
   args: string;
   signature?: string;
 }
+
+type ToolCallDelta = {
+  index?: number;
+  id?: string;
+  function?: { name?: string; arguments?: string };
+  thought_signature?: string;
+  extra_content?: { google?: { thought_signature?: string } };
+};
 
 const EMPTY_USAGE: ResponseUsage = {
   input_tokens: 0,
@@ -39,10 +49,9 @@ export function createResponsesStreamTransformer(
   model: string
 ): TransformStream<Uint8Array, Uint8Array> {
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
+  const input = new SseLineBuffer();
 
   const responseId = makeResponseId();
-  let leftover = "";
   let sequence = 0;
   let outputIndex = 0;
   let started = false;
@@ -76,6 +85,8 @@ export function createResponsesStreamTransformer(
     status: ResponseObject["status"],
     output: ResponseOutputItem[]
   ): ResponseObject {
+    const reason =
+      status === "incomplete" ? incompleteReason(finishReason) : undefined;
     return {
       id: responseId,
       object: "response",
@@ -85,10 +96,7 @@ export function createResponsesStreamTransformer(
       output,
       output_text: messageText,
       error: null,
-      incomplete_details:
-        status === "incomplete" && finishReason
-          ? { reason: finishReason }
-          : null,
+      incomplete_details: reason ? { reason } : null,
       instructions: request.instructions ?? null,
       max_output_tokens: request.max_output_tokens ?? null,
       parallel_tool_calls: request.parallel_tool_calls ?? true,
@@ -228,17 +236,12 @@ export function createResponsesStreamTransformer(
 
   // ----- function call items -----
 
-  function handleToolCallDelta(
-    delta: {
-      index?: number;
-      id?: string;
-      function?: { name?: string; arguments?: string };
-      thought_signature?: string;
-    },
-    controller: Controller
-  ) {
+  function handleToolCallDelta(delta: ToolCallDelta, controller: Controller) {
     const index = delta.index ?? 0;
     let pending = toolCalls.get(index);
+    // The OpenAI-compatible endpoint nests the signature under extra_content;
+    // the native path puts it on the call directly.
+    const signature = readToolCallSignature(delta);
 
     if (!pending) {
       // Reasoning and text are finished once tool calls begin.
@@ -251,7 +254,7 @@ export function createResponsesStreamTransformer(
         callId: delta.id ?? `call_${responseId}_${index}`,
         name: delta.function?.name ?? "",
         args: "",
-        signature: delta.thought_signature,
+        signature,
       };
       toolCalls.set(index, pending);
 
@@ -273,7 +276,7 @@ export function createResponsesStreamTransformer(
     }
 
     if (delta.function?.name) pending.name = delta.function.name;
-    if (delta.thought_signature) pending.signature = delta.thought_signature;
+    if (signature) pending.signature = signature;
 
     const argsDelta = delta.function?.arguments;
     if (argsDelta) {
@@ -327,8 +330,7 @@ export function createResponsesStreamTransformer(
     finished = true;
     start(controller);
 
-    const incomplete =
-      finishReason === "length" || finishReason === "content_filter";
+    const incomplete = incompleteReason(finishReason) !== undefined;
     closeReasoning(controller);
     closeMessage(controller, incomplete ? "incomplete" : "completed");
     closeToolCalls(controller);
@@ -347,9 +349,10 @@ export function createResponsesStreamTransformer(
       incomplete,
     });
 
+    // A truncated response ends on its own event type, not response.completed.
     emit(
       {
-        type: "response.completed",
+        type: incomplete ? "response.incomplete" : "response.completed",
         response: snapshot(incomplete ? "incomplete" : "completed", output),
       },
       controller
@@ -362,12 +365,7 @@ export function createResponsesStreamTransformer(
         delta?: {
           content?: string;
           reasoning_content?: string;
-          tool_calls?: Array<{
-            index?: number;
-            id?: string;
-            function?: { name?: string; arguments?: string };
-            thought_signature?: string;
-          }>;
+          tool_calls?: ToolCallDelta[];
         };
         finish_reason?: string | null;
       }>;
@@ -441,11 +439,7 @@ export function createResponsesStreamTransformer(
   return new TransformStream({
     transform(chunk, controller) {
       start(controller);
-      const text = leftover + decoder.decode(chunk, { stream: true });
-      const lines = text.split("\n");
-      leftover = lines.pop() || "";
-
-      for (const line of lines) {
+      for (const line of input.push(chunk)) {
         if (!line.startsWith("data: ")) continue;
         const payload = line.slice(6).trim();
         if (!payload || payload === "[DONE]") continue;

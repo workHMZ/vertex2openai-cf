@@ -39,12 +39,12 @@ export async function handleModels(env: Env): Promise<Response> {
 
     // Suffixes for each model
     const suffixes = [""];
-    if (includeOpenAIVariants) {
-      suffixes.push("-openai", "-openaisearch");
-    }
 
-    // Grounded search is not offered for image-generation models.
+    // Image models always take the native route (the OpenAI-compatible
+    // endpoint cannot ask for the IMAGE modality), and grounded search is
+    // rejected or returns nothing on them (tested live, 2026-09-24).
     if (!caps.isImage) {
+      if (includeOpenAIVariants) suffixes.push("-openai", "-openaisearch");
       suffixes.push("-search");
     }
 
@@ -57,12 +57,7 @@ export async function handleModels(env: Env): Promise<Response> {
     }
 
     for (const suffix of suffixes) {
-      const modelId = baseId + suffix;
-      // Experimental models have no prefix
-      const finalId = baseId.includes("-exp-")
-        ? modelId
-        : `${prefix}${modelId}`;
-
+      const finalId = `${prefix}${baseId}${suffix}`;
       if (!seen.has(finalId)) {
         seen.add(finalId);
         models.push({

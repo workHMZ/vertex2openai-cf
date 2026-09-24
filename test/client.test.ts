@@ -7,6 +7,7 @@ import {
   buildProjectGenerateContentUrl,
   buildHeaders,
   getCredentialSources,
+  missingCredentialMessage,
   type VertexClientOptions,
 } from "../src/vertex/client";
 import { parseServiceAccountJsons, getExpressKeys } from "../src/config";
@@ -75,6 +76,20 @@ describe("buildExpressGenerateContentUrl", () => {
   test("carries the key in x-goog-api-key instead", () => {
     assert.equal(buildHeaders(express)["x-goog-api-key"], "secret-key");
     assert.equal(buildHeaders(sa)["Authorization"], "Bearer token");
+  });
+
+  test("refuses Service Account credentials", () => {
+    assert.throws(() => buildExpressGenerateContentUrl(sa, "gemini-3.8-flash", false));
+  });
+});
+
+describe("missingCredentialMessage", () => {
+  test("names the setting each route needs", () => {
+    assert.match(missingCredentialMessage("express"), /VERTEX_EXPRESS_API_KEY/);
+    assert.match(missingCredentialMessage("service_account"), /GOOGLE_CREDENTIALS_JSON/);
+    const any = missingCredentialMessage();
+    assert.match(any, /VERTEX_EXPRESS_API_KEY/);
+    assert.match(any, /GOOGLE_CREDENTIALS_JSON/);
   });
 });
 
@@ -150,6 +165,15 @@ describe("parseServiceAccountJsons", () => {
   test("handles an empty or absent value", () => {
     assert.deepEqual(parseServiceAccountJsons(undefined), []);
     assert.deepEqual(parseServiceAccountJsons(""), []);
+  });
+
+  test("skips a malformed object but keeps the good ones around it", () => {
+    const parsed = parseServiceAccountJsons(`${one},{"type": broken},${two}`);
+    assert.deepEqual(parsed.map((s) => s.project_id), ["p1", "p2"]);
+  });
+
+  test("tolerates the newlines a pasted multi-line key brings", () => {
+    assert.equal(parseServiceAccountJsons(`\n${one}\n,\n${two}\n`).length, 2);
   });
 });
 

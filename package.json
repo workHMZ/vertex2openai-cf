@@ -32,6 +32,8 @@
     "deploy": "node scripts/deploy.js",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/test.js",
+    "test:e2e": "node --test test/e2e/*.test.mjs",
+    "bench": "node --import ./test/support/register.mjs scripts/bench-cpu.mjs",
     "verify": "npm run typecheck && npm test"
   },
   "devDependencies": {

@@ -144,6 +144,16 @@ describe("processVertexResponse", () => {
     assert.equal(res.choices[0].message.content, null);
   });
 
+  test("reports a blocked prompt as content_filter, not stop", () => {
+    // Documented: no candidates, only promptFeedback.blockReason.
+    const res = processVertexResponse(
+      { promptFeedback: { blockReason: "PROHIBITED_CONTENT" } },
+      "m"
+    );
+    assert.equal(res.choices[0].finish_reason, "content_filter");
+    assert.equal(res.choices[0].message.content, null);
+  });
+
   test("renders inline image data as a data URL", () => {
     const res = processVertexResponse(
       {

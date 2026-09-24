@@ -32,6 +32,8 @@ const main = async () => {
   // Skip interactive setup in CI environments (like Cloudflare Dashboard)
   if (process.env.CI || !process.stdout.isTTY) {
     console.log('🚀 CI environment detected. Skipping interactive setup and deploying directly...');
+    // An open readline keeps the process alive when stdin is a pipe that never closes.
+    rl.close();
     runCommand('npx wrangler deploy');
     return;
   }

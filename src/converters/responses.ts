@@ -22,6 +22,7 @@ import type {
   ResponseObject,
   ResponseOutputItem,
   ResponseUsage,
+  ResponseIncompleteReason,
 } from "../types";
 import { readToolCallSignature } from "./thought-signature";
 
@@ -206,12 +207,20 @@ export function convertTextFormat(
 
 // ----- Response: Chat Completions -> Responses -----
 
-const FINISH_TO_STATUS: Record<string, ResponseObject["status"]> = {
-  stop: "completed",
-  tool_calls: "completed",
-  length: "incomplete",
-  content_filter: "incomplete",
+const INCOMPLETE_REASONS: Record<string, ResponseIncompleteReason> = {
+  length: "max_output_tokens",
+  content_filter: "content_filter",
 };
+
+/**
+ * The Responses reason for a Chat finish_reason that ended the response
+ * early, or undefined when it finished normally.
+ */
+export function incompleteReason(
+  finishReason: string | null | undefined
+): ResponseIncompleteReason | undefined {
+  return finishReason ? INCOMPLETE_REASONS[finishReason] : undefined;
+}
 
 export function makeResponseId(seed: number = Date.now()): string {
   return `resp_${seed.toString(36)}`;
@@ -291,8 +300,8 @@ export function chatToResponse(
 ): ResponseObject {
   const responseId = makeResponseId();
   const choice = completion.choices[0];
-  const finish = choice?.finish_reason ?? "stop";
-  const status = FINISH_TO_STATUS[finish] ?? "completed";
+  const reason = incompleteReason(choice?.finish_reason);
+  const status = reason ? "incomplete" : "completed";
 
   const output = buildOutputItems(responseId, {
     reasoning: choice?.message.reasoning_content,
@@ -310,8 +319,7 @@ export function chatToResponse(
     output,
     output_text: choice?.message.content ?? "",
     error: null,
-    incomplete_details:
-      status === "incomplete" ? { reason: finish } : null,
+    incomplete_details: reason ? { reason } : null,
     instructions: request.instructions ?? null,
     max_output_tokens: request.max_output_tokens ?? null,
     parallel_tool_calls: request.parallel_tool_calls ?? true,

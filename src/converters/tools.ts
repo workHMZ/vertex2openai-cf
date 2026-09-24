@@ -28,10 +28,10 @@ export function convertToolsToVertex(
         decl.description = tool.function.description;
       }
       if (tool.function.parameters) {
-        // Remove $schema if present (Vertex doesn't accept it)
-        const params = { ...tool.function.parameters };
-        delete params["$schema"];
-        decl.parameters = params;
+        // parametersJsonSchema takes the client's JSON Schema as-is. The
+        // OpenAPI-subset `parameters` field rejects `$ref`/`$defs` and
+        // `type: [..., "null"]`, which Pydantic and Zod emit routinely.
+        decl.parametersJsonSchema = tool.function.parameters;
       }
       declarations.push(decl);
     }

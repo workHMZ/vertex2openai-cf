@@ -152,7 +152,8 @@ export interface VertexPart {
     data: string; // base64
   };
   fileData?: {
-    mimeType?: string;
+    /** Required by Vertex even for URLs it fetches itself. */
+    mimeType: string;
     fileUri: string;
   };
   functionCall?: {
@@ -195,7 +196,10 @@ export interface VertexGenerationConfig {
   frequencyPenalty?: number;
   presencePenalty?: number;
   responseMimeType?: string;
-  responseSchema?: Record<string, unknown>;
+  /** Carries a plain JSON Schema; replaces the OpenAPI-subset responseSchema. */
+  responseFormat?: {
+    text: { mimeType: "APPLICATION_JSON"; schema?: Record<string, unknown> };
+  };
   candidateCount?: number;
   thinkingConfig?: VertexThinkingConfig;
   responseModalities?: string[];
@@ -205,7 +209,8 @@ export interface VertexGenerationConfig {
 export interface VertexFunctionDeclaration {
   name: string;
   description?: string;
-  parameters?: Record<string, unknown>;
+  /** Plain JSON Schema; mutually exclusive with the OpenAPI-subset `parameters`. */
+  parametersJsonSchema?: Record<string, unknown>;
 }
 
 export interface VertexToolConfig {
@@ -248,6 +253,8 @@ export interface VertexUsageMetadata {
 
 export interface VertexResponse {
   candidates?: VertexCandidate[];
+  /** Only present, with no candidates, when the prompt itself was blocked. */
+  promptFeedback?: { blockReason?: string; blockReasonMessage?: string };
   usageMetadata?: VertexUsageMetadata;
   modelVersion?: string;
 }
@@ -336,6 +343,12 @@ export interface ResponseUsage {
 
 export type ResponseItemStatus = "in_progress" | "completed" | "incomplete";
 
+/**
+ * The reasons this adapter can produce. The spec's enum also has
+ * max_messages and steered, but never Chat's "length".
+ */
+export type ResponseIncompleteReason = "max_output_tokens" | "content_filter";
+
 export interface ResponseReasoningItem {
   id: string;
   type: "reasoning";
@@ -379,7 +392,7 @@ export interface ResponseObject {
   output: ResponseOutputItem[];
   output_text: string;
   error: null | { code: string; message: string };
-  incomplete_details: null | { reason: string };
+  incomplete_details: null | { reason: ResponseIncompleteReason };
   instructions: string | null;
   max_output_tokens: number | null;
   parallel_tool_calls: boolean;

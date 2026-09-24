@@ -117,6 +117,44 @@ describe("createVertexStreamTransformer", () => {
   });
 });
 
+describe("createVertexStreamTransformer edge cases", () => {
+  const finishes = (payloads: string[]) =>
+    parseChunks(payloads)
+      .flatMap((c) => c.choices ?? [])
+      .map((c: { finish_reason: string | null }) => c.finish_reason)
+      .filter(Boolean);
+
+  test("reports a blocked prompt as content_filter", async () => {
+    // Documented shape: first frame, promptFeedback, no candidates.
+    const payloads = await pump(createVertexStreamTransformer("m"), [
+      'data: {"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}\n\n',
+    ]);
+    assert.deepEqual(finishes(payloads), ["content_filter"]);
+    assert.equal(parseChunks(payloads)[0].choices[0].delta.role, "assistant");
+    assert.equal(payloads.at(-1), "[DONE]");
+  });
+
+  test("passes an upstream error frame on instead of a fake stop", async () => {
+    const payloads = await pump(createVertexStreamTransformer("m"), [
+      'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"par"}]}}]}\n\n',
+      'data: {"error":{"code":500,"message":"Internal error","status":"INTERNAL"}}\n\n',
+    ]);
+    const chunks = payloads.filter((p) => p !== "[DONE]").map((p) => JSON.parse(p));
+    assert.deepEqual(chunks.at(-1), {
+      error: { code: 500, message: "Internal error", status: "INTERNAL" },
+    });
+    assert.deepEqual(finishes(payloads), []);
+  });
+
+  test("still finishes when the stream ends before finishReason", async () => {
+    const payloads = await pump(createVertexStreamTransformer("m"), [
+      'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"cut"}]}}]}\n\n',
+    ]);
+    assert.deepEqual(finishes(payloads), ["stop"]);
+    assert.equal(payloads.at(-1), "[DONE]");
+  });
+});
+
 describe("createStreamTransformer", () => {
   test("terminates with [DONE] even when upstream never sends one", async () => {
     const payloads = await pump(createStreamTransformer("m"), [
@@ -158,6 +196,28 @@ describe("StreamingReasoningProcessor", () => {
     assert.equal(reasoning + r, "secret");
     assert.equal(content + c, "public");
   });
+
+  test("drops the blank lines Vertex puts after a thought", () => {
+    // Live shape: "</vertex_think_tag>\n\n" then the answer, split across chunks.
+    const p = new StreamingReasoningProcessor();
+    const out = [
+      p.processChunk("<vertex_think_tag>hmm"),
+      p.processChunk("\n</vertex_think_tag>\n"),
+      p.processChunk("\nNo, 1001 = 7 × 11 × 13.\n\n  indented"),
+    ];
+    assert.equal(out.map(([c]) => c).join(""), "No, 1001 = 7 × 11 × 13.\n\n  indented");
+  });
+
+  test("keeps leading indentation when there was no thought", () => {
+    const p = new StreamingReasoningProcessor();
+    assert.equal(p.processChunk("    code")[0], "    code");
+  });
+
+  test("a closing tag cut off mid-thought stays out of the content", () => {
+    const p = new StreamingReasoningProcessor();
+    p.processChunk("<vertex_think_tag>deep thought</vertex_");
+    assert.deepEqual(p.flushRemaining(), ["", "</vertex_"]);
+  });
 });
 
 describe("usage normalisation in the OpenAI-compatible stream", () => {
@@ -192,6 +252,48 @@ describe("finish_reason handling in the OpenAI-compatible stream", () => {
     assert.deepEqual(finishes, ["stop"]);
   });
 
+  test("keeps usage and finish_reason when the last chunk also carries text", async () => {
+    // Live shape from a max_tokens-truncated request: the final text, the
+    // finish_reason and the usage all arrive on one chunk.
+    const payloads = await pump(createStreamTransformer("m"), [
+      'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"role":"assistant","content":"<vertex_think_tag>hmm</vertex_think_tag>"}}]}\n\n',
+      'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"content":"\\n\\n"},"finish_reason":"length"}],"usage":{"prompt_tokens":9,"completion_tokens":37,"total_tokens":46}}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const chunks = parseChunks(payloads);
+    const finishes = chunks
+      .flatMap((c) => c.choices ?? [])
+      .map((c: { finish_reason: string | null }) => c.finish_reason)
+      .filter(Boolean);
+    assert.deepEqual(finishes, ["length"]);
+    assert.equal(chunks.filter((c) => c.usage).length, 1);
+  });
+
+  test("keeps finish_reason when the finishing text is all reasoning", async () => {
+    const payloads = await pump(createStreamTransformer("m"), [
+      'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"content":"<vertex_think_tag>still thinking"},"finish_reason":"length"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const chunks = parseChunks(payloads);
+    assert.equal(chunks[0].choices[0].delta.reasoning_content, "still thinking");
+    const finishes = chunks
+      .flatMap((c) => c.choices ?? [])
+      .map((c: { finish_reason: string | null }) => c.finish_reason)
+      .filter(Boolean);
+    assert.deepEqual(finishes, ["length"]);
+  });
+
+  test("keeps role and tool calls that share a chunk with text", async () => {
+    const payloads = await pump(createStreamTransformer("m"), [
+      'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"role":"assistant","content":"Checking.","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const delta = parseChunks(payloads)[0].choices[0].delta;
+    assert.equal(delta.role, "assistant");
+    assert.equal(delta.content, "Checking.");
+    assert.equal(delta.tool_calls[0].id, "c1");
+  });
+
   test("still synthesises a finish chunk when upstream sends none", async () => {
     const payloads = await pump(createStreamTransformer("m"), [
       'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
@@ -216,4 +318,90 @@ describe("finish_reason handling in the OpenAI-compatible stream", () => {
       }
     }
   });
+});
+
+describe("OpenAI-compatible stream flushing", () => {
+  const texts = (payloads: string[]) =>
+    parseChunks(payloads).map((c) => c.choices?.[0]?.delta ?? {});
+
+  test("holds back a possible opening tag split across chunks", async () => {
+    const payloads = await pump(createStreamTransformer("m"), [
+      'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"content":"a <vertex_th"}}]}\n\n',
+      'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"content":"ink_tag>why</vertex_think_tag>b"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const deltas = texts(payloads);
+    assert.equal(deltas.map((d) => d.content ?? "").join(""), "a b");
+    assert.equal(deltas.map((d) => d.reasoning_content ?? "").join(""), "why");
+  });
+
+  test("releases held-back text at [DONE] and when upstream just stops", async () => {
+    for (const tail of ["data: [DONE]\n\n", ""]) {
+      const payloads = await pump(createStreamTransformer("m"), [
+        'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"content":"x <vertex"}}]}\n\n',
+        tail,
+      ]);
+      assert.equal(texts(payloads).map((d) => d.content ?? "").join(""), "x <vertex", JSON.stringify(tail));
+      assert.equal(payloads.at(-1), "[DONE]");
+    }
+  });
+
+  test("releases a thought cut off without its closing tag", async () => {
+    for (const tail of ["data: [DONE]\n\n", ""]) {
+      const payloads = await pump(createStreamTransformer("m"), [
+        'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"content":"<vertex_think_tag>unfinished </vertex"}}]}\n\n',
+        tail,
+      ]);
+      const reasoning = texts(payloads).map((d) => d.reasoning_content ?? "").join("");
+      assert.equal(reasoning, "unfinished </vertex", JSON.stringify(tail));
+    }
+  });
+
+  test("skips a malformed frame without dropping the stream", async () => {
+    const payloads = await pump(createStreamTransformer("m"), [
+      "data: {oops\n\n",
+      'data: {"id":"x","created":1,"choices":[{"index":0,"delta":{"content":"fine"},"finish_reason":"stop"}]}\n\n',
+    ]);
+    assert.equal(texts(payloads).map((d) => d.content ?? "").join(""), "fine");
+  });
+
+  test("the native transformer passes an explicit [DONE] through once", async () => {
+    const payloads = await pump(createVertexStreamTransformer("m"), [
+      'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}\n\n',
+      "data: [DONE]\n\n",
+      "data: {not json}\n\n",
+    ]);
+    assert.equal(payloads.filter((p) => p === "[DONE]").length, 1);
+  });
+});
+
+test("a streamed image costs time in proportion to its size", async () => {
+  // A generated image is one SSE frame of several MB, read in ~1 KB pieces.
+  // Re-splitting the growing buffer on every read made this quadratic
+  // (8.3 s of CPU for a default-size image on a slow machine). Absolute
+  // timings depend on the machine, so compare 4x the data: linear work takes
+  // about 4x as long, quadratic about 16x.
+  async function ms(size: number): Promise<number> {
+    const frame = `data: ${JSON.stringify({
+      candidates: [{ content: { role: "model", parts: [{ inlineData: { mimeType: "image/png", data: "A".repeat(size) } }] }, finishReason: "STOP" }],
+    })}\n\n`;
+    const bytes = new TextEncoder().encode(frame);
+    let best = Infinity;
+    for (let run = 0; run < 3; run++) {
+      const source = new ReadableStream<Uint8Array>({
+        start(c) {
+          for (let i = 0; i < bytes.length; i += 1024) c.enqueue(bytes.subarray(i, i + 1024));
+          c.close();
+        },
+      });
+      const start = performance.now();
+      const out = await new Response(source.pipeThrough(createVertexStreamTransformer("m"))).text();
+      best = Math.min(best, performance.now() - start);
+      assert.match(out, /data:image\/png;base64,A{1000}/);
+    }
+    return Math.max(best, 1);
+  }
+  const small = await ms(700_000);
+  const large = await ms(2_800_000);
+  assert.ok(large / small < 8, `4x the data took ${(large / small).toFixed(1)}x as long (${small.toFixed(1)} -> ${large.toFixed(1)} ms)`);
 });
