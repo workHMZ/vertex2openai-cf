@@ -1,6 +1,6 @@
 # Vertex2OpenAI on Cloudflare Workers
 
-**v2.1.3** — Use Gemini 3 and 4 through OpenAI-compatible APIs. Runs on Cloudflare Workers with zero runtime dependencies.
+**v2.1.4** — Use Gemini 3 and 4 through OpenAI-compatible APIs. Runs on Cloudflare Workers with zero runtime dependencies.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/workHMZ/vertex2openai-cf)
 
@@ -11,7 +11,7 @@ https://github.com/user-attachments/assets/f39a1f83-e61e-45f7-a0a9-5f0f157b9295
 | Feature | Support |
 | --- | --- |
 | APIs | Chat Completions and Responses, with streaming, tools and JSON Schema |
-| Models | Gemini 3 and **Gemini 4 Argon**; reasoning, Google Search, image input and generation |
+| Models | Gemini 3 and **Gemini 4** (**Carbon** and **Argon**); reasoning, Google Search, image and document input, image generation |
 | Credentials | Service accounts and Vertex Express keys, with token refresh, rotation and failover |
 
 ## Deploy
@@ -49,13 +49,13 @@ curl https://your-worker.workers.dev/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-4-argon",
+    "model": "gemini-4-carbon",
     "reasoning_effort": "medium",
     "messages": [{"role": "user", "content": "Hi"}]
   }'
 ```
 
-For Responses, send `{"model":"gemini-4-argon","input":"Hi","reasoning":{"effort":"medium"}}` to `/v1/responses`.
+For Responses, send `{"model":"gemini-4-carbon","input":"Hi","reasoning":{"effort":"medium"}}` to `/v1/responses`.
 
 | Model option | Use |
 | --- | --- |
@@ -67,7 +67,7 @@ Keep `thought_signature` in tool-call history. Send the full conversation in Res
 
 ## Thinking
 
-Use `reasoning_effort` in Chat Completions and `reasoning.effort` in Responses. For **Gemini 4 Argon**, **Gemini 3.8 Flash** and **Gemini 3.1 Pro Preview**:
+Use `reasoning_effort` in Chat Completions and `reasoning.effort` in Responses. For **Gemini 4 Carbon**, **Gemini 4 Argon**, **Gemini 3.8 Flash** and **Gemini 3.1 Pro Preview**:
 
 | Client value | Vertex level | Use |
 | --- | --- | --- |
@@ -75,9 +75,9 @@ Use `reasoning_effort` in Chat Completions and `reasoning.effort` in Responses. 
 | `medium` | `MEDIUM` | General coding and analysis |
 | `high`, `xhigh`, `max` | `HIGH` | More complex reasoning |
 
-When omitted, Argon and 3.8 Flash default to `MEDIUM`; 3.1 Pro Preview defaults to `HIGH`. `none` selects the lowest thinking level; thinking stays enabled.
+When omitted, Carbon, Argon and 3.8 Flash default to `MEDIUM`; 3.1 Pro Preview defaults to `HIGH`. `none` selects the lowest thinking level; thinking stays enabled.
 
-The `-nothinking` and `-max` model suffixes select `LOW` and `HIGH` respectively, overriding the request field. For example, `gemini-4-argon-max` uses `HIGH` even with `reasoning_effort: "low"`.
+The `-nothinking` and `-max` model suffixes select `LOW` and `HIGH` respectively, overriding the request field. For example, `gemini-4-carbon-max` uses `HIGH` even with `reasoning_effort: "low"`.
 
 `max_tokens` (Chat) and `max_output_tokens` (Responses) cover thinking tokens and the final answer. Leave enough output tokens for both.
 
