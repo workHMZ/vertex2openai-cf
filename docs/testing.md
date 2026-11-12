@@ -1,6 +1,35 @@
 # Validation and performance history
 
-This record preserves measurements from v1.x through v2.1.3. **Wall time, local CPU and Cloudflare CPU are different measurements.** Historical values are not a controlled cross-version benchmark. See the [README](../README.md#deploy) for current deployment guidance.
+This record preserves measurements from v1.x through v2.1.4. **Wall time, local CPU and Cloudflare CPU are different measurements.** Historical values are not a controlled cross-version benchmark. See the [README](../README.md#deploy) for current deployment guidance.
+
+## Gemini 4 Carbon compatibility, v2.1.4 — 2026-11-12
+
+The compatibility release passed `npm run verify`: **294/294 unit tests**, with **99.84% line**, **93.60% branch** and **100% function** coverage. Deployment build: **83.82 KiB**, **19.68 KiB gzipped**, **6 ms startup time** reported by Wrangler. Regression coverage includes `gemini-4-carbon` and allowlist `gemini-4-carbon-cyber-permissive` capability flags, `/v1/models` advertisement (`gemini-4-carbon` only, raising the service-account list from 63 to 69 variants), thinking-level clamping, removal of unsupported sampling/penalty/`n=1` fields on both routes, local 400 rejection of `n != 1`, native `CONTINUATION` reporting, and Office/OpenDocument/plain-text URL MIME mapping.
+
+Before patching, probing `gemini-4-carbon` through the deployed v2.1.3 Cloudflare Worker (service-account route) returned HTTP 200 and `CARBON_CF_OK` (40 input, 9 output tokens) on a clean request, while `reasoning_effort: "none"` reproduced upstream HTTP 400 (`Thinking level is unsupported: THINKING_LEVEL_MINIMAL`). Direct upstream probes also confirmed HTTP 400 (`Penalty is not enabled for this model`) when forwarding penalties.
+
+Real upstream checks ran on Linux with Node 24.22.2 and an existing gcloud login against `gemini-4-carbon` in `global`:
+
+| Run | API route | Scenarios | Result |
+| --- | --- | ---: | --- |
+| Initial full run (old 180 s script timeout) | Native GenerateContent + OpenAI compatibility | 14 | 12 passed, 2 aborted at 180 s during `global` queue waits (17 HTTP requests, 1 recovered 429) |
+| Targeted rerun (300 s script timeout) | Native structured output + OpenAI `-nothinking` stream | 2 | **2/2 passed** (21.29 s and 22.62 s; 2 HTTP requests, no retries) |
+| **Combined coverage** | **Both project-scoped routes** | **14** | **All 14 scenarios verified** |
+
+During the initial run, upstream `global` queue waits ranged from 22.49 s to 176.76 s per call; aligning the test script timeout with the Worker's 300 s `STREAM_START_TIMEOUT_MS` resolved the two client-side aborts. Each route covered parameter filtering with `reasoning_effort: "none"` (`LOW`), `-nothinking` streaming, `-max`, JSON Schema output, a signed function-call round trip, and streaming/non-streaming Responses conversion. Direct probes also verified native `googleSearch`, OpenAI `web_search_options`, `stop` and `seed`.
+
+After deploying v2.1.4 to Cloudflare Workers (service-account authentication, `global` location), production checks verified all endpoints end to end:
+
+| Production check | Result | Wall time |
+| --- | --- | ---: |
+| `GET /` health and `GET /v1/models` | HTTP 200 · **69 model variants** (including 6 `[PAY] gemini-4-carbon*` ids) | 0.077 s / 0.026 s |
+| Chat `n=2` local validation | HTTP 400 · `only supports n=1` before contacting Vertex | 0.027 s |
+| Chat (`[PAY] gemini-4-carbon`, `reasoning_effort: "none"`, filtered penalties/sampling) | HTTP 200 · `CARBON_CF_OK` · stop (40 in, 9 out) | 31.15 s |
+| Chat streaming (`[PAY] gemini-4-carbon-nothinking` overriding `high`) | HTTP 200 · `CARBON_CF_OK` · `[DONE]` (after one transient 524 during upstream queue hold) | 17.39 s |
+| Responses (`[PAY] gemini-4-carbon`, `reasoning.effort: "minimal"`) | HTTP 200 · completed · `CARBON_CF_OK` (40 in, 9 out) | 31.06 s |
+| Responses streaming (`[PAY] gemini-4-carbon`, `reasoning.effort: "minimal"`) | HTTP 200 · `CARBON_CF_OK` · completed event (40 in, 9 out) | 30.84 s |
+
+Run the reproducible converter checks with `npm run test:carbon:gcloud`; see [test instructions](../test/README.md#gemini-4-checks-with-an-existing-gcloud-login). As with Argon, `gemini-4-carbon` defaults to `MEDIUM` (`gemini-4-carbon-cyber-permissive` defaults to `HIGH`), clamps `none`/`minimal`/`-nothinking` to `LOW`, and reports native `CONTINUATION` as partial output (`length` / `response.incomplete`). See [Google's Carbon guide](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-carbon).
 
 ## Thinking-level checks, v2.1.3 — 2026-10-15
 
@@ -55,7 +84,7 @@ Real upstream checks ran on Linux with Node 24.18.0 and an existing gcloud login
 
 Each route covered parameter filtering with minimum thinking, the `-nothinking` and `-max` variants, Chat streaming, JSON Schema output, a signed function-call round trip, and both streaming and non-streaming Responses conversion. An earlier minimal direct native probe also returned HTTP 200 and `ARGON_OK`.
 
-Run the reproducible checks with `npm run test:argon:gcloud`; see [test instructions](../test/README.md#argon-checks-with-an-existing-gcloud-login). These results validate real Vertex calls and the conversion code. They do **not** validate Express-key credentials, service-account token exchange, a deployed Cloudflare Worker, search/image generation, or long decode. No production deployment was performed for this validation.
+Run the reproducible checks with `npm run test:argon:gcloud`; see [test instructions](../test/README.md#gemini-4-checks-with-an-existing-gcloud-login). These results validate real Vertex calls and the conversion code. They do **not** validate Express-key credentials, service-account token exchange, a deployed Cloudflare Worker, search/image generation, or long decode. No production deployment was performed for this validation.
 
 Argon keeps the upstream default thinking level (`medium`); `none`, `minimal` and `-nothinking` select `low`, and `-max` selects `high`. Both upstream routes omit ignored sampling controls, unsupported penalties and `n=1`; other `n` values return a local 400. Long decode is not implemented: outputs beyond the per-request limit require the native `v1beta1` continuation protocol. Native `CONTINUATION` results are reported as partial output (`length` / `response.incomplete`). See [Google's Argon guide](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon).
 

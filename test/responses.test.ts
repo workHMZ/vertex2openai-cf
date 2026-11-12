@@ -144,13 +144,15 @@ describe("responsesRequestToChat", () => {
     assert.equal(chat.reasoning_effort, "high");
   });
 
-  test("3.1 Pro Responses minimum effort reaches Vertex as LOW", () => {
-    for (const effort of ["none", "minimal"]) {
-      const chat = responsesRequestToChat({
-        model: "gemini-3.1-pro-preview", input: "hi", reasoning: { effort },
-      });
-      const config = buildGenerationConfig(chat, parseModelName(chat.model));
-      assert.equal(config.thinkingConfig?.thinkingLevel, "LOW", effort);
+  test("3.1 Pro and Gemini 4 Carbon Responses minimum effort reach Vertex as LOW", () => {
+    for (const model of ["gemini-3.1-pro-preview", "gemini-4-carbon", "gemini-4-argon"]) {
+      for (const effort of ["none", "minimal"]) {
+        const chat = responsesRequestToChat({
+          model, input: "hi", reasoning: { effort },
+        });
+        const config = buildGenerationConfig(chat, parseModelName(chat.model));
+        assert.equal(config.thinkingConfig?.thinkingLevel, "LOW", `${model}/${effort}`);
+      }
     }
   });
 

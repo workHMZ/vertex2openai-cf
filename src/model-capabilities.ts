@@ -45,8 +45,14 @@ const NO_MINIMAL_THINKING_LEVEL = new Set([
   "gemini-3.8-flash",
 ]);
 
-/** Argon API restrictions documented by Google Cloud on 2026-10-13. */
-const ARGON_MODELS = new Set([
+/**
+ * Gemini 4 Carbon and Argon API restrictions documented by Google Cloud:
+ * thinkingLevel accepts LOW/MEDIUM/HIGH only, custom sampling is ignored,
+ * penalties 400, and candidateCount is fixed at 1.
+ */
+const GEMINI_4_RESTRICTED_MODELS = new Set([
+  "gemini-4-carbon",
+  "gemini-4-carbon-cyber-permissive",
   "gemini-4-argon",
   "gemini-4-argon-cyber-permissive",
 ]);
@@ -84,7 +90,7 @@ export function getModelCapabilities(baseModel: string): ModelCapabilities {
   const version = parseModelVersion(baseModel);
   const isSupported = atLeast(version, MINIMUM_SUPPORTED_MAJOR);
   const isImage = segment(baseModel, "image");
-  const isArgon = ARGON_MODELS.has(baseModel);
+  const isGemini4Restricted = GEMINI_4_RESTRICTED_MODELS.has(baseModel);
 
   return {
     version,
@@ -94,10 +100,11 @@ export function getModelCapabilities(baseModel: string): ModelCapabilities {
     isPro: segment(baseModel, "pro"),
     // Every Gemini 3 model thinks; image models reject thinkingConfig.
     supportsThinking: isSupported && !isImage,
-    supportsMinimalThinkingLevel: !isArgon && !NO_MINIMAL_THINKING_LEVEL.has(baseModel),
-    supportsPenalties: !isArgon && !NO_PENALTIES.has(baseModel),
-    supportsSampling: !isArgon,
-    supportsCandidateCount: !isArgon,
+    supportsMinimalThinkingLevel:
+      !isGemini4Restricted && !NO_MINIMAL_THINKING_LEVEL.has(baseModel),
+    supportsPenalties: !isGemini4Restricted && !NO_PENALTIES.has(baseModel),
+    supportsSampling: !isGemini4Restricted,
+    supportsCandidateCount: !isGemini4Restricted,
   };
 }
 

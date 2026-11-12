@@ -118,19 +118,24 @@ describe("getModelCapabilities", () => {
     assert.equal(getModelCapabilities("gemini-3.1-pro-preview").supportsPenalties, true);
   });
 
-  test("Argon applies its documented restrictions without changing future models", () => {
-    for (const model of ["gemini-4-argon", "gemini-4-argon-cyber-permissive"]) {
+  test("Gemini 4 Carbon and Argon apply their documented restrictions without changing future models", () => {
+    for (const model of [
+      "gemini-4-carbon",
+      "gemini-4-carbon-cyber-permissive",
+      "gemini-4-argon",
+      "gemini-4-argon-cyber-permissive",
+    ]) {
       const caps = getModelCapabilities(model);
-      assert.equal(caps.isSupported, true);
-      assert.equal(caps.supportsThinking, true);
-      assert.equal(caps.supportsMinimalThinkingLevel, false);
-      assert.equal(caps.supportsPenalties, false);
-      assert.equal(caps.supportsSampling, false);
-      assert.equal(caps.supportsCandidateCount, false);
-      assert.equal(resolveThinkingLevel("none", caps), "LOW");
-      assert.equal(resolveThinkingLevel("minimal", caps), "LOW");
-      assert.equal(resolveThinkingLevel("medium", caps), "MEDIUM");
-      assert.equal(resolveThinkingLevel("max", caps), "HIGH");
+      assert.equal(caps.isSupported, true, model);
+      assert.equal(caps.supportsThinking, true, model);
+      assert.equal(caps.supportsMinimalThinkingLevel, false, model);
+      assert.equal(caps.supportsPenalties, false, model);
+      assert.equal(caps.supportsSampling, false, model);
+      assert.equal(caps.supportsCandidateCount, false, model);
+      assert.equal(resolveThinkingLevel("none", caps), "LOW", model);
+      assert.equal(resolveThinkingLevel("minimal", caps), "LOW", model);
+      assert.equal(resolveThinkingLevel("medium", caps), "MEDIUM", model);
+      assert.equal(resolveThinkingLevel("max", caps), "HIGH", model);
     }
     assert.equal(getModelCapabilities("gemini-4-flash").supportsSampling, true);
     assert.equal(getModelCapabilities("gemini-3.8-flash").supportsCandidateCount, true);
@@ -197,14 +202,17 @@ describe("bundled model list", () => {
     }
   });
 
-  test("includes the current GA Gemini 3 flash series", () => {
+  test("includes Gemini 4 Carbon and Argon alongside the GA Gemini 3 flash series", () => {
     for (const id of [
+      "gemini-4-carbon",
+      "gemini-4-argon",
       "gemini-3.8-flash",
       "gemini-3.7-flash",
       "gemini-3.6-flash",
       "gemini-3.5-flash",
     ]) {
       assert.ok(defaultModels.vertex_models.includes(id), `missing ${id}`);
+      assert.ok(defaultModels.vertex_express_models.includes(id), `missing express ${id}`);
     }
   });
 

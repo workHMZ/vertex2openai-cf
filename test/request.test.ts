@@ -23,39 +23,48 @@ const req = (over: Partial<OpenAIRequest> = {}): OpenAIRequest => ({
   ...over,
 });
 
-describe("Gemini 4 Argon requests", () => {
+describe("Gemini 4 Carbon and Argon requests", () => {
   test("filters unsupported and ignored parameters on both upstream routes", () => {
-    const request = req({ model: "gemini-4-argon", n: 1, frequency_penalty: 0,
-      presence_penalty: 0.5, temperature: 0.2, top_p: 0.9, top_k: 20,
-      max_tokens: 8192, reasoning_effort: "none" });
-    const original = structuredClone(request);
-    const info = parseModelName(request.model);
-    const native = buildVertexGenerateContentBody(request, info).generationConfig!;
-    for (const field of ["candidateCount", "frequencyPenalty", "presencePenalty", "temperature", "topP", "topK"]) {
-      assert.ok(!(field in native), field);
+    for (const model of [
+      "gemini-4-carbon",
+      "gemini-4-carbon-cyber-permissive",
+      "gemini-4-argon",
+      "gemini-4-argon-cyber-permissive",
+    ]) {
+      const request = req({ model, n: 1, frequency_penalty: 0,
+        presence_penalty: 0.5, temperature: 0.2, top_p: 0.9, top_k: 20,
+        max_tokens: 8192, reasoning_effort: "none" });
+      const original = structuredClone(request);
+      const info = parseModelName(request.model);
+      const native = buildVertexGenerateContentBody(request, info).generationConfig!;
+      for (const field of ["candidateCount", "frequencyPenalty", "presencePenalty", "temperature", "topP", "topK"]) {
+        assert.ok(!(field in native), `${model}:${field}`);
+      }
+      assert.equal(native.maxOutputTokens, 8192);
+      assert.deepEqual(native.thinkingConfig, { includeThoughts: true, thinkingLevel: "LOW" });
+      const openai = buildOpenAICompatibleBody(request, info);
+      for (const field of ["n", "frequency_penalty", "presence_penalty", "temperature", "top_p", "top_k"]) {
+        assert.ok(!(field in openai), `${model}:${field}`);
+      }
+      assert.equal(openai.model, `google/${model}`);
+      assert.equal(openai.max_tokens, 8192);
+      assert.deepEqual((openai.extra_body as { google: { thinking_config: unknown } }).google.thinking_config,
+        { include_thoughts: true, thinking_level: "low" });
+      assert.deepEqual(request, original);
     }
-    assert.equal(native.maxOutputTokens, 8192);
-    assert.deepEqual(native.thinkingConfig, { includeThoughts: true, thinkingLevel: "LOW" });
-    const openai = buildOpenAICompatibleBody(request, info);
-    for (const field of ["n", "frequency_penalty", "presence_penalty", "temperature", "top_p", "top_k"]) {
-      assert.ok(!(field in openai), field);
-    }
-    assert.equal(openai.model, "google/gemini-4-argon");
-    assert.equal(openai.max_tokens, 8192);
-    assert.deepEqual((openai.extra_body as { google: { thinking_config: unknown } }).google.thinking_config,
-      { include_thoughts: true, thinking_level: "low" });
-    assert.deepEqual(request, original);
   });
 
   test("keeps the upstream default and maps both thinking suffixes", () => {
-    for (const [suffix, level] of [["", undefined], ["-nothinking", "LOW"], ["-max", "HIGH"]] as const) {
-      const request = req({ model: `gemini-4-argon${suffix}` });
-      const info = parseModelName(request.model);
-      assert.equal(buildGenerationConfig(request, info).thinkingConfig?.thinkingLevel, level);
-      const google = (buildOpenAICompatibleBody(request, info).extra_body as {
-        google: { thinking_config: { thinking_level?: string } };
-      }).google;
-      assert.equal(google.thinking_config.thinking_level, level?.toLowerCase());
+    for (const baseModel of ["gemini-4-carbon", "gemini-4-carbon-cyber-permissive", "gemini-4-argon"]) {
+      for (const [suffix, level] of [["", undefined], ["-nothinking", "LOW"], ["-max", "HIGH"]] as const) {
+        const request = req({ model: `${baseModel}${suffix}` });
+        const info = parseModelName(request.model);
+        assert.equal(buildGenerationConfig(request, info).thinkingConfig?.thinkingLevel, level);
+        const google = (buildOpenAICompatibleBody(request, info).extra_body as {
+          google: { thinking_config: { thinking_level?: string } };
+        }).google;
+        assert.equal(google.thinking_config.thinking_level, level?.toLowerCase());
+      }
     }
   });
 });
@@ -789,6 +798,23 @@ describe("guessImageMimeType", () => {
   test("reads the extension, ignoring query strings and case", () => {
     assert.equal(guessImageMimeType("https://x.test/a.WEBP?v=2"), "image/webp");
     assert.equal(guessImageMimeType("gs://bucket/scan.pdf"), "application/pdf");
+    assert.equal(guessImageMimeType("gs://bucket/notes.TXT#top"), "text/plain");
+    assert.equal(
+      guessImageMimeType("gs://bucket/report.docx?alt=media"),
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    assert.equal(
+      guessImageMimeType("gs://bucket/slides.pptx"),
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    );
+    assert.equal(
+      guessImageMimeType("gs://bucket/sheet.xlsx"),
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    assert.equal(
+      guessImageMimeType("gs://bucket/memo.odt"),
+      "application/vnd.oasis.opendocument.text"
+    );
   });
 
   test("falls back to JPEG for anything it cannot place", () => {
