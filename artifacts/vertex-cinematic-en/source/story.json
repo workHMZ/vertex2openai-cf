@@ -1,0 +1,19 @@
+{
+  "title": "Vertex2OpenAI — Speak OpenAI. Run Gemini.",
+  "duration": 33,
+  "fps": 60,
+  "width": 1920,
+  "height": 1080,
+  "language": "en",
+  "music": {"title": "Signal Path", "bpm": 120, "key": "D minor → F major", "original": true},
+  "scenes": [
+    {"start": 0, "end": 4, "name": "Signal", "copy": "Speak OpenAI. Run Gemini."},
+    {"start": 4, "end": 8, "name": "Bridge", "copy": "Meet Vertex2OpenAI. Your app → Cloudflare Worker → Vertex AI."},
+    {"start": 8, "end": 12, "name": "Drop-in", "copy": "Same SDK. New engine. /v1/chat/completions · /v1/responses · /v1/models"},
+    {"start": 12, "end": 16, "name": "Capabilities", "copy": "Streaming · Tool calling · Reasoning · JSON Schema · Google Search · Images & documents · Image generation"},
+    {"start": 16, "end": 20, "name": "Resilience", "copy": "Keys rotate. Requests fail over. Tokens refresh."},
+    {"start": 20, "end": 24, "name": "Edge", "copy": "0 runtime dependencies. Runs on Cloudflare Workers."},
+    {"start": 24, "end": 28, "name": "Models", "copy": "Gemini 4. Ready. Carbon and Argon, plus the Gemini 3 family."},
+    {"start": 28, "end": 33, "name": "Finale", "copy": "Vertex2OpenAI. Speak OpenAI. Run Gemini. github.com/workHMZ/vertex2openai-cf"}
+  ]
+}

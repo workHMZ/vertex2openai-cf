@@ -4,7 +4,7 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/workHMZ/vertex2openai-cf)
 
-https://github.com/user-attachments/assets/f39a1f83-e61e-45f7-a0a9-5f0f157b9295
+https://github.com/user-attachments/assets/a593be8b-0c9c-46d9-9b3c-a5d5cfbb45a0
 
 ## Features
 
