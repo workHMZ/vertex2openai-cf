@@ -1,6 +1,6 @@
 # Validation and performance history
 
-This record preserves measurements from v1.x through v2.1.5. **Wall time, local CPU and Cloudflare CPU are different measurements.** Historical values are not a controlled cross-version benchmark. See the [README](../README.md#deploy) for current deployment guidance.
+This record preserves measurements from v2.0.0 through v2.1.5. **Wall time, local CPU and Cloudflare CPU are different measurements.** Historical values are not a controlled cross-version benchmark. See the [README](../README.md#deploy) for current deployment guidance.
 
 ## Gemini 4 Hydrogen compatibility, v2.1.5 — 2026-11-16
 
@@ -293,8 +293,6 @@ The following numbers are retained from earlier committed READMEs and Releases. 
 
 | Version / source | Environment and scope | Recorded measurement |
 | --- | --- | --- |
-| [v1.0.0 README][v1] | Initial release | No recorded test duration or CPU benchmark |
-| [Post-v1.0 README][legacy] | Legacy estimate; measurement method unspecified | Image JSON parsing/conversion: **50–130 ms CPU** |
 | [v2.0.0 README][v2] | Local text conversion only | **~0.01 ms CPU** |
 | [v2.0.0 README][v2] | Local workerd, real default image reply, 2.9 MB base64 | **1.9 ms CPU** |
 | [v2.0.0 README][v2] | Local workerd, 2K image, 11.6 MB base64 | **8.5 ms CPU** |
@@ -326,8 +324,6 @@ These corrected v2.1.0 measurements came from `wrangler tail` request `cpuTime`,
 
 CPU time does not include network waiting. See [Cloudflare's limits](https://developers.cloudflare.com/workers/platform/limits/) for CPU, memory and request budgets. For the later v2.1.1 samples, see the production follow-up above; the fixtures differ.
 
-[v1]: https://github.com/workHMZ/vertex2openai-cf/blob/v1.0.0/README.md
-[legacy]: https://github.com/workHMZ/vertex2openai-cf/blob/ea482a2/README.md
 [v2]: https://github.com/workHMZ/vertex2openai-cf/blob/v2.0.0/README.md
 [v201]: https://github.com/workHMZ/vertex2openai-cf/releases/tag/v2.0.1
 [v21]: https://github.com/workHMZ/vertex2openai-cf/blob/v2.1.0/README.md
