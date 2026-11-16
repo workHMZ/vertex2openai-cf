@@ -183,7 +183,7 @@ export interface VertexSafetySetting {
 export interface VertexThinkingConfig {
   includeThoughts?: boolean;
   thinkingBudget?: number;
-  thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | "MINIMAL";
+  thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | "XHIGH" | "MINIMAL";
 }
 
 export interface VertexGenerationConfig {

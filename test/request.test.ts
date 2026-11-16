@@ -23,9 +23,10 @@ const req = (over: Partial<OpenAIRequest> = {}): OpenAIRequest => ({
   ...over,
 });
 
-describe("Gemini 4 Carbon and Argon requests", () => {
+describe("Gemini 4 Hydrogen, Carbon and Argon requests", () => {
   test("filters unsupported and ignored parameters on both upstream routes", () => {
     for (const model of [
+      "gemini-4-hydrogen",
       "gemini-4-carbon",
       "gemini-4-carbon-cyber-permissive",
       "gemini-4-argon",
@@ -55,8 +56,9 @@ describe("Gemini 4 Carbon and Argon requests", () => {
   });
 
   test("keeps the upstream default and maps both thinking suffixes", () => {
-    for (const baseModel of ["gemini-4-carbon", "gemini-4-carbon-cyber-permissive", "gemini-4-argon"]) {
-      for (const [suffix, level] of [["", undefined], ["-nothinking", "LOW"], ["-max", "HIGH"]] as const) {
+    for (const baseModel of ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-carbon-cyber-permissive", "gemini-4-argon"]) {
+      const top = baseModel === "gemini-4-hydrogen" ? "XHIGH" : "HIGH";
+      for (const [suffix, level] of [["", undefined], ["-nothinking", "LOW"], ["-max", top]] as const) {
         const request = req({ model: `${baseModel}${suffix}` });
         const info = parseModelName(request.model);
         assert.equal(buildGenerationConfig(request, info).thinkingConfig?.thinkingLevel, level);
@@ -64,6 +66,20 @@ describe("Gemini 4 Carbon and Argon requests", () => {
           google: { thinking_config: { thinking_level?: string } };
         }).google;
         assert.equal(google.thinking_config.thinking_level, level?.toLowerCase());
+      }
+    }
+  });
+
+  test("only Hydrogen receives XHIGH for xhigh and max effort", () => {
+    for (const [model, top] of [["gemini-4-hydrogen", "XHIGH"], ["gemini-4-carbon", "HIGH"], ["gemini-3.8-flash", "HIGH"]] as const) {
+      for (const [effort, level] of [["high", "HIGH"], ["xhigh", top], ["max", top]] as const) {
+        const request = req({ model, reasoning_effort: effort });
+        const info = parseModelName(request.model);
+        assert.equal(buildGenerationConfig(request, info).thinkingConfig?.thinkingLevel, level, `${model}/${effort}`);
+        const google = (buildOpenAICompatibleBody(request, info).extra_body as {
+          google: { thinking_config: { thinking_level?: string } };
+        }).google;
+        assert.equal(google.thinking_config.thinking_level, level.toLowerCase(), `${model}/${effort}`);
       }
     }
   });

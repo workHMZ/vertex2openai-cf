@@ -1,6 +1,49 @@
 # Validation and performance history
 
-This record preserves measurements from v1.x through v2.1.4. **Wall time, local CPU and Cloudflare CPU are different measurements.** Historical values are not a controlled cross-version benchmark. See the [README](../README.md#deploy) for current deployment guidance.
+This record preserves measurements from v1.x through v2.1.5. **Wall time, local CPU and Cloudflare CPU are different measurements.** Historical values are not a controlled cross-version benchmark. See the [README](../README.md#deploy) for current deployment guidance.
+
+## Gemini 4 Hydrogen compatibility, v2.1.5 — 2026-11-16
+
+The compatibility release passed `npm run verify`: **296/296 unit tests**, with **99.84% line**, **93.63% branch** and **100% function** coverage. Deployment build: **84.13 KiB**, **19.73 KiB gzipped**, **1 ms startup time** reported by Wrangler. Regression coverage includes the `gemini-4-hydrogen` capability flags, `/v1/models` advertisement (raising the service-account list from 69 to 75 variants), `XHIGH` for `xhigh`/`max`/`-max` on Hydrogen only (other models still fold to `HIGH`), `LOW` clamping for `none`/`minimal`/`-nothinking`, removal of unsupported sampling/penalty/`n=1` fields on both routes, local 400 rejection of `n != 1`, and native `CONTINUATION` reporting.
+
+Direct native probes against `gemini-4-hydrogen` in `global` before patching confirmed the documented restrictions:
+
+| Probe | Result |
+| --- | --- |
+| No `thinkingConfig` | HTTP 200 · thinking tokens reported (default `HIGH`) |
+| `thinkingLevel: "LOW"` / `"XHIGH"` | HTTP 200 |
+| `thinkingLevel: "MINIMAL"` | HTTP 400 · `Thinking level is unsupported: THINKING_LEVEL_MINIMAL` |
+| `thinkingBudget` | HTTP 400 · `Thinking budget is not supported for this model` |
+| `frequencyPenalty` | HTTP 400 · `Penalty is not enabled for this model` |
+| `temperature` / `topP` / `topK` | HTTP 200 (documented as ignored) |
+
+Real upstream checks ran on Linux with Node 24.22.3 and an existing gcloud login against `gemini-4-hydrogen` in `global`:
+
+| Run | API route | Scenarios | Result |
+| --- | --- | ---: | --- |
+| Initial full run | Native GenerateContent + OpenAI compatibility | 14 | 11 passed, 3 failed on upstream 429 after bounded retries (21 HTTP requests) |
+| Targeted rerun | OpenAI compatibility tool round trip + both Responses scenarios | 3 | **3/3 passed** (4 HTTP requests) |
+| **Combined coverage** | **Both project-scoped routes** | **14** | **All 14 scenarios verified** |
+
+The three initial failures were `RESOURCE_EXHAUSTED` responses unrelated to request content. Each route covered parameter filtering with `reasoning_effort: "none"` (`LOW`), `-nothinking` streaming, `-max` (`XHIGH`), JSON Schema output, a signed function-call round trip, and streaming/non-streaming Responses conversion.
+
+After deploying v2.1.5 to Cloudflare Workers (service-account authentication, `global` location), production checks verified all endpoints end to end:
+
+| Production check | Result | Wall time |
+| --- | --- | ---: |
+| `GET /` health and `GET /v1/models` | HTTP 200 · **75 model variants** (including 6 `[PAY] gemini-4-hydrogen*` ids) | 0.252 s / 0.048 s |
+| Chat `n=2` local validation | HTTP 400 · `only supports n=1` before contacting Vertex | 0.047 s |
+| Chat (`[PAY] gemini-4-hydrogen`, `reasoning_effort: "none"`, filtered penalties/sampling) | HTTP 200 · `HYDROGEN_CF_OK` · stop (41 in, 39 out, 29 reasoning) | 1.60 s |
+| Chat streaming (`[PAY] gemini-4-hydrogen-nothinking` overriding `high`) | HTTP 200 · `HYDROGEN_CF_OK` · `[DONE]` (41 in, 10 out) | 14.03 s |
+| Chat (`[PAY] gemini-4-hydrogen`, effort omitted) | HTTP 200 · `HYDROGEN_CF_OK` · stop (56 reasoning) | 2.35 s |
+| Chat streaming (`[PAY] gemini-4-hydrogen`, `reasoning_effort: "xhigh"`) | HTTP 200 · `HYDROGEN_CF_OK` · `[DONE]` (222 reasoning) | 4.48 s |
+| Chat (`[PAY] gemini-4-hydrogen-max` overriding `low`) | HTTP 200 · `HYDROGEN_CF_OK` · stop (117 reasoning) | 2.54 s |
+| Chat (`[PAY] gemini-4-hydrogen-openai`, `reasoning_effort: "xhigh"`) | HTTP 200 · `HYDROGEN_CF_OK` · stop (244 reasoning) | 2.77 s |
+| Responses (`[PAY] gemini-4-hydrogen`, `reasoning.effort: "minimal"`) | HTTP 200 · completed · `HYDROGEN_CF_OK` (41 in, 44 out) | 1.57 s |
+| Responses streaming (`[PAY] gemini-4-hydrogen`, `reasoning.effort: "xhigh"`) | HTTP 200 · `HYDROGEN_CF_OK` · completed event (41 in, 144 out) | 1.28 s |
+| Chat (`[PAY] gemini-4-hydrogen-search`) | HTTP 200 · grounded one-sentence answer · stop | 6.67 s |
+
+Run the reproducible converter checks with `npm run test:hydrogen:gcloud`; see [test instructions](../test/README.md#gemini-4-checks-with-an-existing-gcloud-login). `gemini-4-hydrogen` keeps the upstream default (`HIGH`) when no effort is given, clamps `none`/`minimal`/`-nothinking` to `LOW`, and maps `xhigh`/`max`/`-max` to `XHIGH`. These results do **not** validate Express-key credentials, image/document input, or long decode on Hydrogen. See [Google's Hydrogen guide](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen).
 
 ## Gemini 4 Carbon compatibility, v2.1.4 — 2026-11-12
 

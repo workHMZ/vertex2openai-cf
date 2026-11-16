@@ -24,6 +24,8 @@ export interface ModelCapabilities {
   supportsThinking: boolean;
   /** Some models reject thinkingLevel: MINIMAL with a 400. */
   supportsMinimalThinkingLevel: boolean;
+  /** Only some models accept thinkingLevel: XHIGH; others top out at HIGH. */
+  supportsXHighThinkingLevel: boolean;
   /** Some models reject frequencyPenalty / presencePenalty. */
   supportsPenalties: boolean;
   /** False when sampling controls are ignored by the model. */
@@ -46,16 +48,23 @@ const NO_MINIMAL_THINKING_LEVEL = new Set([
 ]);
 
 /**
- * Gemini 4 Carbon and Argon API restrictions documented by Google Cloud:
- * thinkingLevel accepts LOW/MEDIUM/HIGH only, custom sampling is ignored,
+ * Gemini 4 Hydrogen, Carbon and Argon API restrictions documented by Google
+ * Cloud: thinkingLevel rejects MINIMAL, custom sampling is ignored,
  * penalties 400, and candidateCount is fixed at 1.
  */
 const GEMINI_4_RESTRICTED_MODELS = new Set([
+  "gemini-4-hydrogen",
   "gemini-4-carbon",
   "gemini-4-carbon-cyber-permissive",
   "gemini-4-argon",
   "gemini-4-argon-cyber-permissive",
 ]);
+
+/**
+ * Models that accept `thinkingLevel: "XHIGH"` (verified against the live API,
+ * 2026-11-16). Everywhere else XHIGH folds down to HIGH.
+ */
+const XHIGH_THINKING_LEVEL = new Set(["gemini-4-hydrogen"]);
 
 /**
  * Models that reject `frequencyPenalty` / `presencePenalty` with
@@ -102,17 +111,19 @@ export function getModelCapabilities(baseModel: string): ModelCapabilities {
     supportsThinking: isSupported && !isImage,
     supportsMinimalThinkingLevel:
       !isGemini4Restricted && !NO_MINIMAL_THINKING_LEVEL.has(baseModel),
+    supportsXHighThinkingLevel: XHIGH_THINKING_LEVEL.has(baseModel),
     supportsPenalties: !isGemini4Restricted && !NO_PENALTIES.has(baseModel),
     supportsSampling: !isGemini4Restricted,
     supportsCandidateCount: !isGemini4Restricted,
   };
 }
 
-export type ThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+export type ThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "XHIGH";
 
 /**
  * OpenAI's reasoning_effort vocabulary, including the `xhigh`/`max` values
- * added alongside the Responses API. Gemini tops out at HIGH.
+ * added alongside the Responses API. Most Gemini models top out at HIGH;
+ * XHIGH is clamped down where it is not accepted.
  */
 const EFFORT_TO_LEVEL: Record<string, ThinkingLevel> = {
   none: "MINIMAL",
@@ -120,8 +131,8 @@ const EFFORT_TO_LEVEL: Record<string, ThinkingLevel> = {
   low: "LOW",
   medium: "MEDIUM",
   high: "HIGH",
-  xhigh: "HIGH",
-  max: "HIGH",
+  xhigh: "XHIGH",
+  max: "XHIGH",
 };
 
 /**
@@ -138,12 +149,16 @@ export function resolveThinkingLevel(
   return clampThinkingLevel(level, caps);
 }
 
-/** Downgrade MINIMAL to LOW on models that reject it, rather than 400ing. */
+/**
+ * Downgrade MINIMAL to LOW and XHIGH to HIGH on models that reject them,
+ * rather than 400ing.
+ */
 export function clampThinkingLevel(
   level: ThinkingLevel,
   caps: ModelCapabilities
 ): ThinkingLevel {
   if (level === "MINIMAL" && !caps.supportsMinimalThinkingLevel) return "LOW";
+  if (level === "XHIGH" && !caps.supportsXHighThinkingLevel) return "HIGH";
   return level;
 }
 

@@ -106,10 +106,10 @@ beforeEach(() => {
   realFetch = globalThis.fetch;
 });
 
-describe("Gemini 4 Carbon and Argon compatibility", () => {
+describe("Gemini 4 Hydrogen, Carbon and Argon compatibility", () => {
   test("rejects unsupported candidate counts before contacting Vertex", async () => {
     stubFetch([OK_VERTEX]);
-    for (const model of ["gemini-4-carbon", "gemini-4-argon"]) {
+    for (const model of ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"]) {
       for (const n of [0, 2, -1, 1.5, "1"]) {
         const res = await call("/v1/chat/completions", {
           method: "POST", headers: authed(),
@@ -125,7 +125,7 @@ describe("Gemini 4 Carbon and Argon compatibility", () => {
   });
 
   test("accepts n=1 and omitted n on both credential routes", async () => {
-    for (const model of ["gemini-4-carbon-nothinking", "gemini-4-argon-nothinking"]) {
+    for (const model of ["gemini-4-hydrogen-nothinking", "gemini-4-carbon-nothinking", "gemini-4-argon-nothinking"]) {
       for (const native of [true, false]) {
         for (const n of [1, undefined]) {
           stubFetch([native ? OK_VERTEX : jsonResponse({ choices: [{ message: { role: "assistant", content: "hello" }, finish_reason: "stop" }] })]);
@@ -148,7 +148,7 @@ describe("Gemini 4 Carbon and Argon compatibility", () => {
 
   test("Responses marks native continuation incomplete, streamed or not", async () => {
     const partial = { candidates: [{ content: { role: "model", parts: [{ text: "partial" }] }, finishReason: "CONTINUATION", continuationToken: "opaque" }] };
-    for (const model of ["gemini-4-carbon", "gemini-4-argon"]) {
+    for (const model of ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"]) {
       for (const stream of [false, true]) {
         stubFetch([() => new Response(stream ? `data: ${JSON.stringify(partial)}\n\n` : JSON.stringify(partial))]);
         const res = await call("/v1/responses", {
@@ -316,10 +316,10 @@ describe("authentication", () => {
 });
 
 describe("GET /v1/models", () => {
-  test("lists Gemini 4 Carbon and Argon variants for both credential types", async () => {
+  test("lists Gemini 4 Hydrogen, Carbon and Argon variants for both credential types", async () => {
     const res = await call("/v1/models", { headers: authed() }, { ...ENV, GOOGLE_CREDENTIALS_JSON: SA_JSON });
     const ids = (await res.json() as { data: { id: string }[] }).data.map(m => m.id);
-    for (const baseModel of ["gemini-4-carbon", "gemini-4-argon"]) {
+    for (const baseModel of ["gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"]) {
       for (const prefix of ["[EXPRESS] ", "[PAY] "]) {
         for (const suffix of ["", "-nothinking", "-max", "-search"]) {
           assert.ok(ids.includes(`${prefix}${baseModel}${suffix}`));

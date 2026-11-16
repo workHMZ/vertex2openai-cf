@@ -144,8 +144,8 @@ describe("responsesRequestToChat", () => {
     assert.equal(chat.reasoning_effort, "high");
   });
 
-  test("3.1 Pro and Gemini 4 Carbon Responses minimum effort reach Vertex as LOW", () => {
-    for (const model of ["gemini-3.1-pro-preview", "gemini-4-carbon", "gemini-4-argon"]) {
+  test("3.1 Pro and Gemini 4 Responses minimum effort reach Vertex as LOW", () => {
+    for (const model of ["gemini-3.1-pro-preview", "gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"]) {
       for (const effort of ["none", "minimal"]) {
         const chat = responsesRequestToChat({
           model, input: "hi", reasoning: { effort },
@@ -153,6 +153,14 @@ describe("responsesRequestToChat", () => {
         const config = buildGenerationConfig(chat, parseModelName(chat.model));
         assert.equal(config.thinkingConfig?.thinkingLevel, "LOW", `${model}/${effort}`);
       }
+    }
+  });
+
+  test("Responses xhigh effort reaches Hydrogen as XHIGH and Carbon as HIGH", () => {
+    for (const [model, level] of [["gemini-4-hydrogen", "XHIGH"], ["gemini-4-carbon", "HIGH"]] as const) {
+      const chat = responsesRequestToChat({ model, input: "hi", reasoning: { effort: "xhigh" } });
+      const config = buildGenerationConfig(chat, parseModelName(chat.model));
+      assert.equal(config.thinkingConfig?.thinkingLevel, level, model);
     }
   });
 
