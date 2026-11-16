@@ -182,7 +182,7 @@ function thinkingLevelFor(
   caps: ModelCapabilities
 ): ThinkingLevel | undefined {
   if (modelInfo.isNoThinking) return clampThinkingLevel("MINIMAL", caps);
-  if (modelInfo.isMaxThinking) return "HIGH";
+  if (modelInfo.isMaxThinking) return clampThinkingLevel("XHIGH", caps);
   return resolveThinkingLevel(request.reasoning_effort, caps);
 }
 

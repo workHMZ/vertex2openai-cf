@@ -118,8 +118,9 @@ describe("getModelCapabilities", () => {
     assert.equal(getModelCapabilities("gemini-3.1-pro-preview").supportsPenalties, true);
   });
 
-  test("Gemini 4 Carbon and Argon apply their documented restrictions without changing future models", () => {
+  test("Gemini 4 Hydrogen, Carbon and Argon apply their documented restrictions without changing future models", () => {
     for (const model of [
+      "gemini-4-hydrogen",
       "gemini-4-carbon",
       "gemini-4-carbon-cyber-permissive",
       "gemini-4-argon",
@@ -135,8 +136,13 @@ describe("getModelCapabilities", () => {
       assert.equal(resolveThinkingLevel("none", caps), "LOW", model);
       assert.equal(resolveThinkingLevel("minimal", caps), "LOW", model);
       assert.equal(resolveThinkingLevel("medium", caps), "MEDIUM", model);
-      assert.equal(resolveThinkingLevel("max", caps), "HIGH", model);
+      assert.equal(resolveThinkingLevel("high", caps), "HIGH", model);
+      const top = model === "gemini-4-hydrogen" ? "XHIGH" : "HIGH";
+      assert.equal(caps.supportsXHighThinkingLevel, top === "XHIGH", model);
+      assert.equal(resolveThinkingLevel("xhigh", caps), top, model);
+      assert.equal(resolveThinkingLevel("max", caps), top, model);
     }
+    assert.equal(getModelCapabilities("gemini-4-flash").supportsXHighThinkingLevel, false);
     assert.equal(getModelCapabilities("gemini-4-flash").supportsSampling, true);
     assert.equal(getModelCapabilities("gemini-3.8-flash").supportsCandidateCount, true);
   });
@@ -171,7 +177,7 @@ describe("resolveThinkingLevel", () => {
     assert.equal(resolveThinkingLevel("high", pro31), "HIGH");
   });
 
-  test("folds the Responses API's xhigh and max into HIGH", () => {
+  test("folds xhigh and max into HIGH where XHIGH is not accepted", () => {
     assert.equal(resolveThinkingLevel("xhigh", pro31), "HIGH");
     assert.equal(resolveThinkingLevel("max", pro31), "HIGH");
   });
@@ -202,8 +208,9 @@ describe("bundled model list", () => {
     }
   });
 
-  test("includes Gemini 4 Carbon and Argon alongside the GA Gemini 3 flash series", () => {
+  test("includes Gemini 4 Hydrogen, Carbon and Argon alongside the GA Gemini 3 flash series", () => {
     for (const id of [
+      "gemini-4-hydrogen",
       "gemini-4-carbon",
       "gemini-4-argon",
       "gemini-3.8-flash",
